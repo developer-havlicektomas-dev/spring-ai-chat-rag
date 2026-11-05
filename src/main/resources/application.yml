@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: spring-ai-kotlin-rag
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:missing}   # never hardcode; export OPENAI_API_KEY
+      chat:
+        options:
+          model: ${CHAT_MODEL:gpt-4o-mini}
+      embedding:
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      qdrant:
+        host: ${QDRANT_HOST:localhost}
+        port: ${QDRANT_GRPC_PORT:6334}
+        collection-name: kotlin-docs
+        initialize-schema: true
