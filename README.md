@@ -4,7 +4,7 @@ A small learning project: RAG over Kotlin docs with Spring Boot 4.1.2, Spring AI
 
 ## Prerequisites
 - JDK 21
-- Qdrant on localhost (REST on 6333, gRPC on 6334). Spring AI uses gRPC on 6334.
+- A running Docker engine (e.g. `colima start`). `bootRun` starts Qdrant from `compose.yaml` via Spring Boot's Docker Compose support (REST/dashboard on 6333, gRPC on 6334; Spring AI uses gRPC) and stops it when the app exits. Data is kept in the `qdrant_storage` volume. Tests skip Docker Compose.
 - `export OPENAI_API_KEY=sk-...`. You need it even to start the app, because creating the Qdrant collection makes one embedding call to read the vector size.
 
 Optional overrides: `CHAT_MODEL` (default `gpt-4o-mini`), `QDRANT_HOST`, `QDRANT_GRPC_PORT`.
