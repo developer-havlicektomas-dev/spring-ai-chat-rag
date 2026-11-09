@@ -21,9 +21,22 @@ curl -X POST localhost:8080/kotlin/docs/ingest
 curl "localhost:8080/kotlin/docs/search?q=how%20do%20I%20avoid%20NullPointerException&k=3"
 curl -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
      -d '{"question":"When should I use async instead of launch?"}'
+# limit retrieval to one doc
+curl -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+     -d '{"question":"How do I start a coroutine?","source":"coroutines.md"}'
 ```
+`/kotlin/chat/ask` returns `{"answer": "...", "sources": [{"source": "coroutines.md", "score": 0.81}]}`.
 
 ## How it works
 - `src/main/resources/docs/*.md`: sample docs. `DocsService.ingest()` reads them with `MarkdownDocumentReader`, splits them with `TokenTextSplitter` and stores them in the Qdrant collection `kotlin-docs`. Running ingest again replaces each file's chunks.
-- `AiConfig` builds a `ChatClient` with `QuestionAnswerAdvisor`. It pulls the top 4 matching chunks into the prompt.
+- `AiConfig` builds a `ChatClient` with `QuestionAnswerAdvisor` (custom prompt in `src/main/resources/prompts/rag-prompt.st`) and `SimpleLoggerAdvisor`. `ChatService` reads the retrieved chunks back from the response context and returns them as `sources`.
 - `KotlinController` exposes the three endpoints.
+
+## Tuning notes (Day 6)
+- `RAG_TOP_K` (default 4): more chunks give more recall but a longer, costlier prompt and more noise. With 4 small docs, 3 to 5 is plenty.
+- `RAG_SIMILARITY_THRESHOLD` (default 0.5): chunks below this cosine score are dropped. Too high and nothing is retrieved, so the model answers "I don't know based on the loaded docs."; too low and off-topic chunks sneak in. Check real scores with `/kotlin/docs/search` before picking a value.
+- `ADVISOR_LOG_LEVEL=DEBUG` logs the full prompt, including the retrieved chunks, which is the fastest way to see why an answer is wrong.
+- The prompt template forbids prior knowledge and gives one fixed refusal sentence, so out-of-scope questions are easy to detect in tests and evals.
+- `source` is validated against `[A-Za-z0-9_-]+\.md` because it is put into a filter expression string.
+
+Queries to try: an in-scope one ("What does `?.let` do?"), a cross-doc one ("Can a sealed class be a data class?"), and an out-of-scope one ("How do I configure Ktor routing?"), which should get the refusal.

@@ -18,15 +18,45 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
     @MockitoBean lateinit var chatService: ChatService
 
     @Test
-    fun `ask returns the answer`() {
-        given(chatService.ask("What is a data class?")).willReturn("A class holding data.")
+    fun `ask returns the answer with sources`() {
+        given(chatService.ask("What is a data class?", null))
+            .willReturn(RagAnswer("A class holding data.", listOf(SourceRef("data-classes.md", 0.82))))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
-            content = """{"question":"What is a data class?"}"""
+            content = """{"question":"  What is a data class?  "}"""
         }.andExpect {
             status { isOk() }
             jsonPath("$.answer") { value("A class holding data.") }
+            jsonPath("$.sources[0].source") { value("data-classes.md") }
         }
+    }
+
+    @Test
+    fun `ask passes the source filter`() {
+        given(chatService.ask("launch vs async?", "coroutines.md")).willReturn(RagAnswer("Use async for results.", emptyList()))
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"launch vs async?","source":"coroutines.md"}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.answer") { value("Use async for results.") }
+        }
+    }
+
+    @Test
+    fun `blank question is rejected`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"   "}"""
+        }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `source with quotes is rejected`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"hi","source":"x' || true"}"""
+        }.andExpect { status { isBadRequest() } }
     }
 
     @Test

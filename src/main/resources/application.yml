@@ -16,3 +16,12 @@ spring:
         port: ${QDRANT_GRPC_PORT:6334}
         collection-name: kotlin-docs
         initialize-schema: true
+
+rag:
+  top-k: ${RAG_TOP_K:4}
+  similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.5}
+
+logging:
+  level:
+    # set to DEBUG to see the full RAG prompt incl. retrieved chunks
+    org.springframework.ai.chat.client.advisor: ${ADVISOR_LOG_LEVEL:INFO}
