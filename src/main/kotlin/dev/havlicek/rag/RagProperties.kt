@@ -6,5 +6,5 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 @ConfigurationProperties("rag")
 data class RagProperties(
     val topK: Int = 4,
-    val similarityThreshold: Double = 0.5,
+    val similarityThreshold: Double = 0.3,
 )

@@ -19,7 +19,7 @@ spring:
 
 rag:
   top-k: ${RAG_TOP_K:4}
-  similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.5}
+  similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.3}
 
 logging:
   level:
