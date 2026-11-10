@@ -5,6 +5,11 @@ import org.mockito.BDDMockito.given
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest
 import org.springframework.http.MediaType
+import org.springframework.http.codec.ServerSentEvent
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.content
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import reactor.core.publisher.Flux
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
@@ -66,5 +71,33 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             status { isOk() }
             jsonPath("$[0].source") { value("null-safety.md") }
         }
+    }
+
+    @Test
+    fun `stream emits server-sent events`() {
+        given(chatService.stream("What is a data class?", null)).willReturn(
+            Flux.just(
+                ServerSentEvent.builder<Any>(TokenChunk(" class")).event("token").build(),
+                ServerSentEvent.builder<Any>("[DONE]").event("done").build(),
+            )
+        )
+        val started = mvc.post("/kotlin/chat/stream") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"What is a data class?"}"""
+        }.andExpect { request { asyncStarted() } }.andReturn()
+
+        mvc.perform(asyncDispatch(started))
+            .andExpect(status().isOk)
+            .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("event:token\ndata:{\"text\":\" class\"}")))
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("event:done")))
+    }
+
+    @Test
+    fun `stream rejects blank question`() {
+        mvc.post("/kotlin/chat/stream") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":""}"""
+        }.andExpect { status { isBadRequest() } }
     }
 }

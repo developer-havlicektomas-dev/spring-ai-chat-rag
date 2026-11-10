@@ -1,6 +1,9 @@
 spring:
   application:
     name: spring-ai-kotlin-rag
+  mvc:
+    async:
+      request-timeout: 2m   # SSE streams run on MVC async; default timeout can cut long answers
   ai:
     openai:
       api-key: ${OPENAI_API_KEY:missing}   # never hardcode; export OPENAI_API_KEY

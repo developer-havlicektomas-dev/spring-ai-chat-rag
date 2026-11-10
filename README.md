@@ -24,6 +24,9 @@ curl -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' 
 # limit retrieval to one doc
 curl -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
      -d '{"question":"How do I start a coroutine?","source":"coroutines.md"}'
+# stream the answer token by token (Server-Sent Events); -N turns off curl buffering
+curl -N -X POST localhost:8080/kotlin/chat/stream -H 'Content-Type: application/json' \
+     -d '{"question":"Can a sealed class be a data class?"}'
 ```
 `/kotlin/chat/ask` returns `{"answer": "...", "sources": [{"source": "coroutines.md", "score": 0.81}]}`.
 
@@ -40,3 +43,9 @@ curl -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' 
 - `source` is validated against `[A-Za-z0-9_-]+\.md` because it is put into a filter expression string.
 
 Queries to try: an in-scope one ("What does `?.let` do?"), a cross-doc one ("Can a sealed class be a data class?"), and an out-of-scope one ("How do I configure Ktor routing?"), which should get the refusal.
+
+## Streaming notes (Day 7)
+- `POST /kotlin/chat/stream` takes the same body as `/kotlin/chat/ask` and returns `text/event-stream`: one `sources` event (as soon as retrieval finishes), then many `token` events like `{"text":" class"}`, then `done`. Failures arrive as an `error` event.
+- Tokens are wrapped in JSON on purpose: SSE clients (browser `EventSource`, OkHttp SSE, Ktor) strip one leading space after `data:`, which would glue words together if raw tokens were sent.
+- The app stays on Spring MVC; returning a `Flux` makes MVC handle the response asynchronously, so no WebFlux switch is needed. `spring.mvc.async.request-timeout` is 2m so long answers are not cut off.
+- Same pipeline as `/ask`: `ChatClient.stream().chatClientResponse()` still runs `QuestionAnswerAdvisor` first, so the retrieved docs are in the context of the streamed chunks.
