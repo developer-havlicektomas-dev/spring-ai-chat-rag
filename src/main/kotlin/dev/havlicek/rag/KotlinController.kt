@@ -15,11 +15,14 @@ data class AskRequest(
     @Pattern(regexp = "[A-Za-z0-9_-]+\\.md") val source: String? = null,
 )
 
+data class KoogRequest(@NotBlank @Size(max = 2000) val question: String)
+
 @RestController
 @RequestMapping("/kotlin")
 class KotlinController(
     private val docsService: DocsService,
     private val chatService: ChatService,
+    private val koogBridgeService: KoogBridgeService,
 ) {
     @PostMapping("/docs/ingest")
     fun ingest(): Map<String, Int> = docsService.ingest()
@@ -36,4 +39,9 @@ class KotlinController(
     @PostMapping("/chat/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
     fun stream(@Valid @RequestBody request: AskRequest): Flux<ServerSentEvent<Any>> =
         chatService.stream(request.question.trim(), request.source)
+
+    /** Day 8: same OpenAI model, but called through Koog's PromptExecutor (bridged from Spring AI). */
+    @PostMapping("/koog/ask")
+    suspend fun koogAsk(@Valid @RequestBody request: KoogRequest): KoogAnswer =
+        koogBridgeService.ask(request.question.trim())
 }

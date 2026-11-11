@@ -21,6 +21,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @MockitoBean lateinit var docsService: DocsService
     @MockitoBean lateinit var chatService: ChatService
+    @MockitoBean lateinit var koogBridgeService: KoogBridgeService
 
     @Test
     fun `ask returns the answer with sources`() {
@@ -98,6 +99,14 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
         mvc.post("/kotlin/chat/stream") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":""}"""
+        }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `koog ask rejects blank question`() {
+        mvc.post("/kotlin/koog/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"  "}"""
         }.andExpect { status { isBadRequest() } }
     }
 }

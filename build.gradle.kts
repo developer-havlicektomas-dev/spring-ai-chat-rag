@@ -19,6 +19,8 @@ repositories {
 }
 
 extra["springAiVersion"] = "2.0.2"
+val koogVersion = "1.3.0"
+val koogSpringAiVersion = "1.3.0-beta"
 
 dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
@@ -29,6 +31,11 @@ dependencies {
 	implementation("org.springframework.ai:spring-ai-vector-store-advisor")
 	implementation("org.springframework.ai:spring-ai-markdown-document-reader")
 	implementation("tools.jackson.module:jackson-module-kotlin")
+	// Koog agents on top of Spring AI: wraps our OpenAI ChatModel into a Koog PromptExecutor
+	implementation("ai.koog:koog-agents-jvm:$koogVersion")
+	implementation("ai.koog:koog-spring-ai-v2-starter-model-chat:$koogSpringAiVersion")
+	// lets Spring MVC controllers be suspend functions
+	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
 	// starts compose.yaml (Qdrant) on bootRun and wires its host/port into Spring AI
 	developmentOnly("org.springframework.boot:spring-boot-docker-compose")
 	developmentOnly("org.springframework.ai:spring-ai-spring-boot-docker-compose")

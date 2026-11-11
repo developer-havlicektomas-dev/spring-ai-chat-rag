@@ -49,3 +49,13 @@ Queries to try: an in-scope one ("What does `?.let` do?"), a cross-doc one ("Can
 - Tokens are wrapped in JSON on purpose: SSE clients (browser `EventSource`, OkHttp SSE, Ktor) strip one leading space after `data:`, which would glue words together if raw tokens were sent.
 - The app stays on Spring MVC; returning a `Flux` makes MVC handle the response asynchronously, so no WebFlux switch is needed. `spring.mvc.async.request-timeout` is 2m so long answers are not cut off.
 - Same pipeline as `/ask`: `ChatClient.stream().chatClientResponse()` still runs `QuestionAnswerAdvisor` first, so the retrieved docs are in the context of the streamed chunks.
+
+## Koog bridge (Day 8)
+- `koog-spring-ai-v2-starter-model-chat` wraps the Spring AI `OpenAiChatModel` into a Koog `LLMClient` and auto-configures a `PromptExecutor`. Same key, same model config, no second OpenAI client.
+- `POST /kotlin/koog/ask` sends a plain prompt (no RAG) through that executor:
+  ```bash
+  curl -s -X POST localhost:8080/kotlin/koog/ask -H 'Content-Type: application/json' \
+    -d '{"question":"What is a sealed class in Kotlin?"}'
+  ```
+- Compare with `/kotlin/chat/ask`: without retrieval the model answers from memory and can be out of date.
+- Koog runs tools itself; Spring AI only gets the tool schemas. That matters for the Day 9 agent.
