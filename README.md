@@ -59,3 +59,18 @@ Queries to try: an in-scope one ("What does `?.let` do?"), a cross-doc one ("Can
   ```
 - Compare with `/kotlin/chat/ask`: without retrieval the model answers from memory and can be out of date.
 - Koog runs tools itself; Spring AI only gets the tool schemas. That matters for the Day 9 agent.
+
+## Koog agent (Day 9)
+`POST /kotlin/agent/ask` runs a Koog `AIAgent` on the bridged `PromptExecutor` with one tool,
+`searchKotlinDocs` (`KotlinDocsTools`, a Koog `ToolSet` over the same Qdrant search as `/docs/search`).
+
+- The model decides whether to call the tool, and how often (`maxIterations = 10` caps the loop).
+- The response lists `toolCalls`, and each call is logged as `Agent tool call: ...`.
+- A new `AIAgent` is built per request because an agent instance holds per-run state; the `ToolRegistry` is shared.
+
+```bash
+curl -s -X POST localhost:8080/kotlin/agent/ask -H 'Content-Type: application/json' \
+  -d '{"question":"Do subclasses of a sealed class have to be declared inside the sealed class?"}'
+curl -s -X POST localhost:8080/kotlin/agent/ask -H 'Content-Type: application/json' \
+  -d '{"question":"Hi, who are you?"}'   # no tool call expected
+```

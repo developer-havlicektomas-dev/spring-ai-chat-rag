@@ -23,6 +23,7 @@ class KotlinController(
     private val docsService: DocsService,
     private val chatService: ChatService,
     private val koogBridgeService: KoogBridgeService,
+    private val koogAgentService: KoogAgentService,
 ) {
     @PostMapping("/docs/ingest")
     fun ingest(): Map<String, Int> = docsService.ingest()
@@ -44,4 +45,9 @@ class KotlinController(
     @PostMapping("/koog/ask")
     suspend fun koogAsk(@Valid @RequestBody request: KoogRequest): KoogAnswer =
         koogBridgeService.ask(request.question.trim())
+
+    /** Day 9: Koog agent that decides itself when to call the searchKotlinDocs tool. */
+    @PostMapping("/agent/ask")
+    suspend fun agentAsk(@Valid @RequestBody request: KoogRequest): AgentAnswer =
+        koogAgentService.ask(request.question.trim())
 }
