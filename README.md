@@ -74,3 +74,30 @@ curl -s -X POST localhost:8080/kotlin/agent/ask -H 'Content-Type: application/js
 curl -s -X POST localhost:8080/kotlin/agent/ask -H 'Content-Type: application/json' \
   -d '{"question":"Hi, who are you?"}'   # no tool call expected
 ```
+
+## RAG chain vs Koog agent (Day 10)
+`scripts/compare-rag-vs-agent.sh` sends the same 5 questions to `/kotlin/chat/ask` (retrieve once, then answer)
+and `/kotlin/agent/ask` (the model decides when and how to search). Needs `jq` and the app running with docs ingested.
+
+```bash
+scripts/compare-rag-vs-agent.sh            # or pass a base URL
+grep 'Agent tool call' app.log             # each tool call is logged by KoogAgentService
+```
+
+Results from one run on 2026-11-13 (gpt-4o-mini, top-k 4, threshold 0.3; answers vary run to run):
+
+| # | Question | RAG chain | Koog agent |
+|---|----------|-----------|------------|
+| 1 | Do sealed subclasses have to be declared inside the sealed class? | Refused ("I don't know") although `sealed-classes.md` was retrieved, 4.5 s | 1 search, correct (same module and package, not nested), 4.4 s |
+| 2 | Data class vs sealed class, when to use each? | Good short answer from both docs, 3.8 s | 2 searches (one per topic), longer and more detailed, 13.6 s |
+| 3 | Safe call on a nullable String with a default? | `?.` plus `?:`, 2.5 s | 1 search, same answer, 4.7 s |
+| 4 | `launch` vs `async`? | Correct with code, 2.9 s | 3 searches (rephrased queries), correct, 7.6 s |
+| 5 | Hi, who are you? | Refused (nothing relevant retrieved), 0.7 s | 0 searches, friendly reply, 1.5 s |
+
+Takeaways:
+- The RAG chain is cheaper and faster and predictable: always exactly one retrieval and one LLM call.
+- The agent writes its own search queries, can search several times (good for comparison questions)
+  and skips search for small talk, but costs more LLM round-trips and latency. `maxIterations` caps it.
+- The strict refusal prompt of the RAG chain sometimes refuses answerable questions (Q1). The agent's
+  reformulated query ("sealed class subclasses location") found the right chunk.
+- `KotlinDocsTools` is plain Kotlin and has its own unit test (`KotlinDocsToolsTest`) with no LLM involved.
