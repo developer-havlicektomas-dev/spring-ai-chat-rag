@@ -18,7 +18,8 @@ repositories {
 	mavenCentral()
 }
 
-extra["springAiVersion"] = "2.0.2"
+// F1: Spring AI 2.1 is still RC (no GA on Maven Central as of 2026-11-16), so this lives on a branch.
+extra["springAiVersion"] = "2.1.0-RC2"
 val koogVersion = "1.3.0"
 val koogSpringAiVersion = "1.3.0-beta"
 
@@ -28,7 +29,11 @@ dependencies {
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("org.springframework.ai:spring-ai-starter-model-openai")
 	implementation("org.springframework.ai:spring-ai-starter-vector-store-qdrant")
-	implementation("org.springframework.ai:spring-ai-vector-store-advisor")
+	// F1: modular RAG (RetrievalAugmentationAdvisor, query transformers, augmenters)
+	implementation("org.springframework.ai:spring-ai-rag")
+	// F1: Spring AI 2.1 sessions (replaces ChatMemory) + the advisors that plug them into ChatClient
+	implementation("org.springframework.ai:spring-ai-session")
+	implementation("org.springframework.ai:spring-ai-session-advisor")
 	implementation("org.springframework.ai:spring-ai-markdown-document-reader")
 	implementation("tools.jackson.module:jackson-module-kotlin")
 	// Koog agents on top of Spring AI: wraps our OpenAI ChatModel into a Koog PromptExecutor

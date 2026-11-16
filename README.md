@@ -32,7 +32,7 @@ curl -N -X POST localhost:8080/kotlin/chat/stream -H 'Content-Type: application/
 
 ## How it works
 - `src/main/resources/docs/*.md`: sample docs. `DocsService.ingest()` reads them with `MarkdownDocumentReader`, splits them with `TokenTextSplitter` and stores them in the Qdrant collection `kotlin-docs`. Running ingest again replaces each file's chunks.
-- `AiConfig` builds a `ChatClient` with `QuestionAnswerAdvisor` (custom prompt in `src/main/resources/prompts/rag-prompt.st`) and `SimpleLoggerAdvisor`. `ChatService` reads the retrieved chunks back from the response context and returns them as `sources`.
+- `AiConfig` builds a `ChatClient` with session advisors (F1), a modular `RetrievalAugmentationAdvisor` (custom prompt in `src/main/resources/prompts/rag-prompt.st`) and `SimpleLoggerAdvisor`. (Days 4-10 used `QuestionAnswerAdvisor`.) `ChatService` reads the retrieved chunks back from the response context and returns them as `sources`.
 - `KotlinController` exposes the three endpoints.
 
 ## Tuning notes (Day 6)
@@ -101,3 +101,20 @@ Takeaways:
 - The strict refusal prompt of the RAG chain sometimes refuses answerable questions (Q1). The agent's
   reformulated query ("sealed class subclasses location") found the right chunk.
 - `KotlinDocsTools` is plain Kotlin and has its own unit test (`KotlinDocsToolsTest`) with no LLM involved.
+
+## Spring AI 2.1: sessions + modular RAG (F1)
+Branch `f1-spring-ai-2.1`, Spring AI `2.1.0-RC2` (no 2.1 GA on Maven Central yet; `main` stays on 2.0.2).
+
+- **Multi-turn chat.** `/kotlin/chat/ask` and `/kotlin/chat/stream` accept an optional `conversationId` and always return one (`conversation` SSE event for streams). Omit it to start a new conversation.
+  ```bash
+  ID=$(curl -s -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+       -d '{"question":"What is a sealed class in Kotlin?"}' | jq -r .conversationId)
+  curl -s -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+       -d "{\"question\":\"Can its subclasses live in a different file?\",\"conversationId\":\"$ID\"}" | jq .answer
+  curl -s localhost:8080/kotlin/chat/sessions/$ID | jq      # what the model sees next turn
+  curl -s -X DELETE localhost:8080/kotlin/chat/sessions/$ID  # forget it
+  ```
+- **SessionService replaces ChatMemory.** `DefaultSessionService` + `InMemorySessionRepository` (TTL `RAG_SESSION_TTL_MINUTES`, default 60). A session is an append-only event log; `SessionAdvisors` loads the active history before the call and appends the user and assistant messages after. Compaction: past `RAG_MAX_TURNS` (10) turns keep only the last `RAG_KEEP_TURNS` (6). System prompts are not stored (config, sent every request). For persistence swap in `spring-ai-session-jdbc`.
+- **QuestionAnswerAdvisor -> RetrievalAugmentationAdvisor.** Three pluggable steps: `CompressionQueryTransformer` rewrites follow-ups into standalone questions (wrapped in `FollowUpQueryTransformer`, which skips the extra LLM call on first turns), `VectorStoreDocumentRetriever` (same topK/threshold/`source` filter), `ContextualQueryAugmenter` (prompt now uses `{context}`; empty retrieval uses `prompts/rag-empty-context.st`, keeping the fixed refusal sentence).
+- **Why the rewrite matters:** "Can its subclasses live in a different file?" without history retrieves the wrong chunks and the model says "No"; inside the conversation it is rewritten to "Can subclasses of a sealed class in Kotlin be defined in a different file...?" and the answer is the correct "Yes, same module and package".
+- Order: session advisors run first (`HIGHEST_PRECEDENCE + 1000` vs RAG's `0`), so RAG sees the history and the session stores the raw question, not the augmented prompt.

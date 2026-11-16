@@ -26,8 +26,8 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `ask returns the answer with sources`() {
-        given(chatService.ask("What is a data class?", null))
-            .willReturn(RagAnswer("A class holding data.", listOf(SourceRef("data-classes.md", 0.82))))
+        given(chatService.ask("What is a data class?", null, null))
+            .willReturn(RagAnswer("A class holding data.", listOf(SourceRef("data-classes.md", 0.82)), "c-1"))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":"  What is a data class?  "}"""
@@ -35,12 +35,13 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             status { isOk() }
             jsonPath("$.answer") { value("A class holding data.") }
             jsonPath("$.sources[0].source") { value("data-classes.md") }
+            jsonPath("$.conversationId") { value("c-1") }
         }
     }
 
     @Test
     fun `ask passes the source filter`() {
-        given(chatService.ask("launch vs async?", "coroutines.md")).willReturn(RagAnswer("Use async for results.", emptyList()))
+        given(chatService.ask("launch vs async?", "coroutines.md", null)).willReturn(RagAnswer("Use async for results.", emptyList(), "c-2"))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":"launch vs async?","source":"coroutines.md"}"""
@@ -67,6 +68,41 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
     }
 
     @Test
+    fun `ask continues a conversation`() {
+        given(chatService.ask("And how do I make one?", null, "c-1")).willReturn(RagAnswer("Use sealed class.", emptyList(), "c-1"))
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"And how do I make one?","conversationId":"c-1"}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.conversationId") { value("c-1") }
+        }
+    }
+
+    @Test
+    fun `odd conversation id is rejected`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"hi","conversationId":"../etc"}"""
+        }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `history of unknown session is 404`() {
+        given(chatService.history("nope")).willReturn(null)
+        mvc.get("/kotlin/chat/sessions/nope").andExpect { status { isNotFound() } }
+    }
+
+    @Test
+    fun `history returns session messages`() {
+        given(chatService.history("c-1")).willReturn(listOf(HistoryMessage("user", "hi"), HistoryMessage("assistant", "hello")))
+        mvc.get("/kotlin/chat/sessions/c-1").andExpect {
+            status { isOk() }
+            jsonPath("$[1].role") { value("assistant") }
+        }
+    }
+
+    @Test
     fun `search returns hits`() {
         given(docsService.search("null", 4)).willReturn(listOf(SearchHit("null-safety.md", 0.9, "text")))
         mvc.get("/kotlin/docs/search?q=null").andExpect {
@@ -77,7 +113,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `stream emits server-sent events`() {
-        given(chatService.stream("What is a data class?", null)).willReturn(
+        given(chatService.stream("What is a data class?", null, null)).willReturn(
             Flux.just(
                 ServerSentEvent.builder<Any>(TokenChunk(" class")).event("token").build(),
                 ServerSentEvent.builder<Any>("[DONE]").event("done").build(),

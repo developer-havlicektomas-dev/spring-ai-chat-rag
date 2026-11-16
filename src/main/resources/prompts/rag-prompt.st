@@ -1,8 +1,9 @@
 {query}
 
 Use ONLY the context between the lines below to answer. Do not use prior knowledge.
+You may use the earlier conversation to understand what the question refers to.
 ---------------------
-{question_answer_context}
+{context}
 ---------------------
 Rules:
 - If the context does not contain the answer, reply exactly: "I don't know based on the loaded docs."

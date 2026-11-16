@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
 import org.springframework.http.MediaType
+import org.springframework.http.ResponseEntity
 import org.springframework.http.codec.ServerSentEvent
 import org.springframework.web.bind.annotation.*
 import reactor.core.publisher.Flux
@@ -13,6 +14,8 @@ data class AskRequest(
     @NotBlank @Size(max = 2000) val question: String,
     // Only plain doc file names; keeps the value safe to put into the filter expression.
     @Pattern(regexp = "[A-Za-z0-9_-]+\\.md") val source: String? = null,
+    // F1: pass the id from a previous answer to continue that conversation
+    @Pattern(regexp = "[A-Za-z0-9-]{1,64}") val conversationId: String? = null,
 )
 
 data class KoogRequest(@NotBlank @Size(max = 2000) val question: String)
@@ -34,12 +37,23 @@ class KotlinController(
 
     @PostMapping("/chat/ask")
     fun ask(@Valid @RequestBody request: AskRequest): RagAnswer =
-        chatService.ask(request.question.trim(), request.source)
+        chatService.ask(request.question.trim(), request.source, request.conversationId)
 
     /** Streaming variant of /chat/ask (Server-Sent Events). Try: curl -N ... */
     @PostMapping("/chat/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
     fun stream(@Valid @RequestBody request: AskRequest): Flux<ServerSentEvent<Any>> =
-        chatService.stream(request.question.trim(), request.source)
+        chatService.stream(request.question.trim(), request.source, request.conversationId)
+
+    /** F1: messages the session currently sends to the model (after compaction). */
+    @GetMapping("/chat/sessions/{id}")
+    fun history(@PathVariable id: String): ResponseEntity<List<HistoryMessage>> =
+        chatService.history(id)?.let { ResponseEntity.ok(it) } ?: ResponseEntity.notFound().build()
+
+    @DeleteMapping("/chat/sessions/{id}")
+    fun forget(@PathVariable id: String): ResponseEntity<Unit> {
+        chatService.forget(id)
+        return ResponseEntity.noContent().build()
+    }
 
     /** Day 8: same OpenAI model, but called through Koog's PromptExecutor (bridged from Spring AI). */
     @PostMapping("/koog/ask")

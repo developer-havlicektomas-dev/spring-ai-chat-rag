@@ -2,43 +2,92 @@ package dev.havlicek.rag
 
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor
-import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor
 import org.springframework.ai.chat.prompt.PromptTemplate
-import org.springframework.ai.vectorstore.SearchRequest
+import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor
+import org.springframework.ai.rag.generation.augmentation.ContextualQueryAugmenter
+import org.springframework.ai.rag.preretrieval.query.transformation.CompressionQueryTransformer
+import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever
+import org.springframework.ai.session.DefaultSessionService
+import org.springframework.ai.session.InMemorySessionRepository
+import org.springframework.ai.session.SessionService
+import org.springframework.ai.session.advisor.SessionAdvisors
+import org.springframework.ai.session.compaction.TurnCountTrigger
+import org.springframework.ai.session.compaction.WindowCompactionStrategy
 import org.springframework.ai.vectorstore.VectorStore
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.io.Resource
+import java.time.Duration
 
 @Configuration
 @EnableConfigurationProperties(RagProperties::class)
 class AiConfig {
 
-    /** ChatClient that retrieves relevant doc chunks from Qdrant before every call (RAG). */
+    /**
+     * F1: Spring AI 2.1 SessionService (replaces ChatMemory + ChatMemoryRepository).
+     * In-memory for now; swap the repository for spring-ai-session-jdbc to persist in Postgres (F8).
+     */
     @Bean
-    fun chatClient(
+    fun sessionService(props: RagProperties): SessionService =
+        DefaultSessionService.builder()
+            .sessionRepository(InMemorySessionRepository.builder().build())
+            .defaultTimeToLive(Duration.ofMinutes(props.sessionTtlMinutes))
+            .build()
+
+    /**
+     * Modular RAG: rewrite follow-ups -> retrieve from Qdrant -> augment the user message.
+     * Replaces the monolithic QuestionAnswerAdvisor from Days 4-7.
+     */
+    @Bean
+    fun ragAdvisor(
         builder: ChatClient.Builder,
         vectorStore: VectorStore,
         props: RagProperties,
         @Value("classpath:prompts/rag-prompt.st") ragPrompt: Resource,
+        @Value("classpath:prompts/rag-empty-context.st") emptyPrompt: Resource,
+    ): RetrievalAugmentationAdvisor =
+        RetrievalAugmentationAdvisor.builder()
+            // "And how do I make one?" -> "How do I create a sealed class in Kotlin?" (only when there is history)
+            .queryTransformers(
+                FollowUpQueryTransformer(CompressionQueryTransformer.builder().chatClientBuilder(builder.clone()).build())
+            )
+            .documentRetriever(
+                VectorStoreDocumentRetriever.builder()
+                    .vectorStore(vectorStore)
+                    .topK(props.topK)
+                    .similarityThreshold(props.similarityThreshold)
+                    .build()
+            )
+            .queryAugmenter(
+                ContextualQueryAugmenter.builder()
+                    .promptTemplate(PromptTemplate(ragPrompt))               // needs {query} and {context}
+                    .emptyContextPromptTemplate(PromptTemplate(emptyPrompt)) // used when nothing passes the threshold
+                    .build()
+            )
+            .build()
+
+    @Bean
+    fun chatClient(
+        builder: ChatClient.Builder,
+        sessionService: SessionService,
+        ragAdvisor: RetrievalAugmentationAdvisor,
+        props: RagProperties,
     ): ChatClient =
         builder
+            // System prompt is config, sent on every request; SessionService refuses to store system messages by default.
             .defaultSystem("You are a concise Kotlin tutor. Prefer short answers with a small code example.")
+            // Session advisors run first (order HIGHEST_PRECEDENCE + 1000), so RAG sees the history.
             .defaultAdvisors(
-                QuestionAnswerAdvisor.builder(vectorStore)
-                    .searchRequest(
-                        SearchRequest.builder()
-                            .topK(props.topK)
-                            .similarityThreshold(props.similarityThreshold)
-                            .build()
+                SessionAdvisors.builder(sessionService)
+                    // keep the prompt small: once a session passes N turns, keep only the last few
+                    .compaction(
+                        TurnCountTrigger(props.maxTurns),
+                        WindowCompactionStrategy.builder().lastTurns(props.keepTurns).build(),
                     )
-                    // Our own template: must keep the {query} and {question_answer_context} placeholders.
-                    .promptTemplate(PromptTemplate(ragPrompt))
-                    .build(),
-                // Logs the full prompt (incl. retrieved context) at DEBUG; see logging level in application.yml.
-                SimpleLoggerAdvisor(),
+                    .build()
             )
+            .defaultAdvisors(ragAdvisor, SimpleLoggerAdvisor())
             .build()
 }

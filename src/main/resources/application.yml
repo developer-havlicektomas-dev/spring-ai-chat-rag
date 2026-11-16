@@ -23,8 +23,12 @@ spring:
 rag:
   top-k: ${RAG_TOP_K:4}
   similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.3}
+  session-ttl-minutes: ${RAG_SESSION_TTL_MINUTES:60}
+  max-turns: ${RAG_MAX_TURNS:10}
+  keep-turns: ${RAG_KEEP_TURNS:6}
 
 logging:
   level:
     # set to DEBUG to see the full RAG prompt incl. retrieved chunks
     org.springframework.ai.chat.client.advisor: ${ADVISOR_LOG_LEVEL:INFO}
+    org.springframework.ai.rag: ${ADVISOR_LOG_LEVEL:INFO}
