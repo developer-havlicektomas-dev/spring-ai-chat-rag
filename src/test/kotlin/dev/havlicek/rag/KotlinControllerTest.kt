@@ -23,6 +23,31 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
     @MockitoBean lateinit var chatService: ChatService
     @MockitoBean lateinit var koogBridgeService: KoogBridgeService
     @MockitoBean lateinit var koogAgentService: KoogAgentService
+    @MockitoBean lateinit var opsAgentService: OpsAgentService
+
+    @Test
+    fun `ops ask returns pending tool calls`() {
+        given(opsAgentService.ask("Delete coroutines.md", null)).willReturn(
+            OpsAnswer("o-1", "awaiting_confirmation", null, listOf(PendingToolCall("call_1", "deleteDocSource", "{}")))
+        )
+        mvc.post("/kotlin/ops/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"message":"Delete coroutines.md"}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.status") { value("awaiting_confirmation") }
+            jsonPath("$.pendingToolCalls[0].tool") { value("deleteDocSource") }
+        }
+    }
+
+    @Test
+    fun `ops confirm without a pending call is a conflict`() {
+        given(opsAgentService.confirm("o-2", true, null, null)).willThrow(ConversationStateException("nothing pending"))
+        mvc.post("/kotlin/ops/confirm") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"conversationId":"o-2","approve":true}"""
+        }.andExpect { status { isConflict() } }
+    }
 
     @Test
     fun `ask returns the answer with sources`() {

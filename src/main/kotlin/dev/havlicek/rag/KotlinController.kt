@@ -18,6 +18,20 @@ data class AskRequest(
     @Pattern(regexp = "[A-Za-z0-9-]{1,64}") val conversationId: String? = null,
 )
 
+data class OpsRequest(
+    @NotBlank @Size(max = 2000) val message: String,
+    @Pattern(regexp = "[A-Za-z0-9-]{1,64}") val conversationId: String? = null,
+)
+
+/** F2: approve or deny the tool calls an /ops/ask answer is waiting on. */
+data class ConfirmRequest(
+    @Pattern(regexp = "[A-Za-z0-9-]{1,64}") @NotBlank val conversationId: String,
+    val approve: Boolean,
+    /** Optional: decide only these call ids (the other awaiting calls get the opposite decision). */
+    val toolCallIds: List<String>? = null,
+    @Size(max = 500) val reason: String? = null,
+)
+
 data class KoogRequest(@NotBlank @Size(max = 2000) val question: String)
 
 @RestController
@@ -27,6 +41,7 @@ class KotlinController(
     private val chatService: ChatService,
     private val koogBridgeService: KoogBridgeService,
     private val koogAgentService: KoogAgentService,
+    private val opsAgentService: OpsAgentService,
 ) {
     @PostMapping("/docs/ingest")
     fun ingest(): Map<String, Int> = docsService.ingest()
@@ -64,4 +79,21 @@ class KotlinController(
     @PostMapping("/agent/ask")
     suspend fun agentAsk(@Valid @RequestBody request: KoogRequest): AgentAnswer =
         koogAgentService.ask(request.question.trim())
+
+    /** F2: ops assistant with tools; destructive tools pause for confirmation (status "awaiting_confirmation"). */
+    @PostMapping("/ops/ask")
+    fun opsAsk(@Valid @RequestBody request: OpsRequest): OpsAnswer =
+        opsAgentService.ask(request.message.trim(), request.conversationId)
+
+    @PostMapping("/ops/confirm")
+    fun opsConfirm(@Valid @RequestBody request: ConfirmRequest): OpsAnswer =
+        opsAgentService.confirm(request.conversationId, request.approve, request.toolCallIds, request.reason?.trim())
+
+    @ExceptionHandler(ConversationStateException::class)
+    fun conflict(e: ConversationStateException): ResponseEntity<Map<String, String?>> =
+        ResponseEntity.status(409).body(mapOf("error" to e.message))
+
+    @ExceptionHandler(NoSuchElementException::class)
+    fun notFound(e: NoSuchElementException): ResponseEntity<Map<String, String?>> =
+        ResponseEntity.status(404).body(mapOf("error" to e.message))
 }

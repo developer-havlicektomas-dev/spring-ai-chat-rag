@@ -118,3 +118,27 @@ Branch `f1-spring-ai-2.1`, Spring AI `2.1.0-RC2` (no 2.1 GA on Maven Central yet
 - **QuestionAnswerAdvisor -> RetrievalAugmentationAdvisor.** Three pluggable steps: `CompressionQueryTransformer` rewrites follow-ups into standalone questions (wrapped in `FollowUpQueryTransformer`, which skips the extra LLM call on first turns), `VectorStoreDocumentRetriever` (same topK/threshold/`source` filter), `ContextualQueryAugmenter` (prompt now uses `{context}`; empty retrieval uses `prompts/rag-empty-context.st`, keeping the fixed refusal sentence).
 - **Why the rewrite matters:** "Can its subclasses live in a different file?" without history retrieves the wrong chunks and the model says "No"; inside the conversation it is rewritten to "Can subclasses of a sealed class in Kotlin be defined in a different file...?" and the answer is the correct "Yes, same module and package".
 - Order: session advisors run first (`HIGHEST_PRECEDENCE + 1000` vs RAG's `0`), so RAG sees the history and the session stores the raw question, not the augmented prompt.
+
+## Tool confirmation (F2, Spring AI 2.1)
+
+`POST /kotlin/ops/ask` is a small "ops assistant" with three Spring AI `@Tool`s in `DocsAdminTools`:
+`listDocSources` runs straight away; `deleteDocSource` and `reindexDocs` have `requiresConfirmation = true`.
+When the model calls one of those, `ToolCallingAdvisor` pauses (nothing runs) and the answer comes back with
+`status: "awaiting_confirmation"` and the pending calls. The paused reply is kept server-side.
+`POST /kotlin/ops/confirm` approves or denies; `ToolCallingManager.executeToolCalls(prompt, reply, decisions)`
+runs the approved calls (a denied call answers the model with the reason) and the model finishes the turn.
+
+```bash
+# 1) ask for something destructive -> paused
+curl -s localhost:8080/kotlin/ops/ask -H 'Content-Type: application/json' \
+  -d '{"message":"Delete the coroutines docs from the index"}' | tee /tmp/ops.json
+# {"conversationId":"...","status":"awaiting_confirmation","pendingToolCalls":[{"id":"call_...","tool":"deleteDocSource","arguments":"{\"source\":\"coroutines.md\"}"}]}
+
+# 2) deny (or "approve":true) -> the model finishes the turn
+curl -s localhost:8080/kotlin/ops/confirm -H 'Content-Type: application/json' \
+  -d "{\"conversationId\":\"$(jq -r .conversationId /tmp/ops.json)\",\"approve\":false,\"reason\":\"still needed\"}"
+```
+
+Rules: a new message while a call is pending -> 409; confirm with nothing pending -> 409; unknown conversation -> 404.
+Policy can also be set without touching code: `spring.ai.tools.confirmation.tools=deleteDocSource`
+(adds tools; only `spring.ai.tools.confirmation.enabled=false` turns the flag off).
