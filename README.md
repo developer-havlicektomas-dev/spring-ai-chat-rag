@@ -142,3 +142,98 @@ curl -s localhost:8080/kotlin/ops/confirm -H 'Content-Type: application/json' \
 Rules: a new message while a call is pending -> 409; confirm with nothing pending -> 409; unknown conversation -> 404.
 Policy can also be set without touching code: `spring.ai.tools.confirmation.tools=deleteDocSource`
 (adds tools; only `spring.ai.tools.confirmation.enabled=false` turns the flag off).
+
+## F3 Better retrieval (Spring AI 2.1)
+
+Same branch, still Spring AI `2.1.0-RC2` (no 2.1 GA on Maven Central on 2026-11-18). Pipeline inside `RetrievalAugmentationAdvisor`:
+
+```
+follow-up rewrite -> Qdrant (topK, threshold, metadata filter)
+  -> [decision-filter] -> [rerank] -> [sufficiency-gate]          (DocumentPostProcessors, each switchable)
+  -> numbered context [1]..[n]  or  general-knowledge fallback prompt
+```
+
+**Config flags** (`application.yml`, env vars in brackets):
+
+| Property | Default | What it does |
+|---|---|---|
+| `rag.chunk-size` (`RAG_CHUNK_SIZE`) | 800 | `TokenTextSplitter` chunk size in tokens |
+| `rag.chunk-overlap` (`RAG_CHUNK_OVERLAP`) | 0 | tokens shared by neighbouring chunks (`withChunkOverlap`, new in 2.1) |
+| `rag.rerank.enabled` / `top-n` / `min-score` | false / 3 / 0.1 | `DecisionDocumentReranker`: one yes/no "does this passage answer the query?" per chunk, sorted by probability |
+| `rag.decision-filter.enabled` / `fail-closed` | false / false | `DecisionDocumentFilter`: injection, contradiction, relevance, answer-evidence questions per chunk |
+| `rag.sufficiency.enabled` / `min-probability` | true / 0.5 | one yes/no "is the context enough?" over all kept chunks; no -> labeled fallback. `false` = old hard refusal |
+| `rag.decision-timeout-seconds` | 20 | timeout per decision batch |
+| `spring.ai.openai.decision.model` | `gpt-6-luna` (Spring AI default) | model behind the auto-configured `OpenAiDecisionModel` (OpenAI Decisions API) |
+
+`rerank` and `decisionFilter` can also be set per request (they override the config).
+
+**Request / response.** `/kotlin/chat/ask` (and `/stream`) accept `sources` (list of file names), `topics` (list; set at ingest
+from `DocsService.TOPICS`: `concurrency`, `classes`, `type-system`), the old `source`, `rerank`, `decisionFilter`. Filters
+are AND-ed and built with `FilterExpressionBuilder` (`source IN [..] AND topic IN [..]`); bad values -> 400 with a message.
+The response adds `answerType` (`grounded` | `general_knowledge_fallback` | `no_context`), `citations`
+(`n`, source, topic, chunkIndex, chunkId, vector score, rerankScore, classification, snippet, `cited`), `sufficiency`
+and `pipeline` (per step: in/out count, ms, surviving chunks). The stream sends `answerType` and `citations` events after `sources`.
+
+```bash
+# grounded, with [n] citations
+curl -s localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+  -d '{"question":"What is the difference between launch and async?"}' | jq '{answer, answerType, citations}'
+# metadata filter
+curl -s localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+  -d '{"question":"How do I create a copy with one property changed?","topics":["classes"]}' | jq .
+# off-topic -> labeled fallback
+curl -s localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+  -d '{"question":"What is the capital of Australia?"}' | jq '{answer, answerType}'
+# decision steps on for one request
+curl -s localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+  -d '{"question":"Can subclasses of a sealed class be declared in another file?","rerank":true,"decisionFilter":true}' | jq .pipeline
+# chunk experiment (re-ingests, then restores the configured settings)
+scripts/chunk-experiment.sh
+```
+
+**Results from the runtime test (2026-11-18, gpt-4o-mini, topK 4, threshold 0.3):**
+
+- Grounded: "launch vs async" -> answer with `[1]` markers, 1 citation (`coroutines.md#1`, score 0.451, cited), sufficiency 1.0, gate 307 ms, 3.8 s total.
+- Filter `topics:["classes"]` "copy with one property changed" -> `data-classes.md#1`, cited `[1]`, 1.6 s. Same question with `sources:["coroutines.md"]` -> nothing passes the threshold -> `general_knowledge_fallback`.
+- Off-topic "capital of Australia" -> `[General knowledge - not from your docs] The capital of Australia is Canberra.` (0.8 s; nothing retrieved, the gate did not need to run).
+- Gate doing the work: "How does debounce work on a Kotlin Flow?" retrieves 1 coroutines chunk, gate says 0.0 -> labeled fallback. With `RAG_SUFFICIENCY_ENABLED=false` the same question got an uncited answer from prior knowledge despite the "only use the sources" rule, and the off-topic one got `no_context` + the refusal sentence.
+- Rerank / filter on vs off (whole request latency, `pipeline` from the response):
+
+| Question | Off | Rerank | Filter | Filter + rerank |
+|---|---|---|---|---|
+| "Can subclasses of a sealed class be declared in another file?" | 4 chunks, 2.11 s | 1 kept: `sealed#0` rerank=0.97 (180 ms), 2.18 s | 2 kept: `sealed#0` INCLUDED, `data#3` CONFLICTING (143 ms), 1.93 s | `sealed#0` only (233+138 ms), 2.16 s |
+| "Difference between a data class and a sealed class? When to use each?" | 4 chunks (2 sealed, 2 data), grounded, 4.87 s | kept `sealed#2` 0.30, `sealed#0` 0.19 -> gate 0.03 -> fallback, 3.30 s | kept only `data#3` -> gate 0.02 -> fallback, 2.83 s | `data#3` -> rerank drops it -> fallback, 2.80 s |
+
+  Take-away: per-passage decisions are great for single-fact questions (noise gone, fewer prompt tokens) but hurt
+  comparison questions, where each chunk answers only half. Hence both are off by default; F4 will measure it properly.
+  Each decision step added roughly 100-350 ms here (parallel calls, 4 at a time).
+
+**Chunk experiment** (`scripts/chunk-experiment.sh`, `/docs/search` k=3; `top1` = source#chunk and cosine score):
+
+| chunkSize:overlap | chunks | launch vs async | null default | sealed in other file | data class copy |
+|---|---|---|---|---|---|
+| 800:0 | 15 | coroutines#1 0.450 | null-safety#1 0.326 | sealed#0 0.580 | data#1 0.466 |
+| 64:16 | 15 | coroutines#1 0.447 | null-safety#1 0.316 | sealed#0 0.581 | data#1 0.469 |
+| 32:8 | 24 | coroutines#1 0.482 | null-safety#2 0.336 | sealed#0 0.581 | data#2 0.479 |
+| 16:0 | 40 | coroutines#3 0.416 | null-safety#1 0.317 | sealed#0 0.585 | data#4 0.483 |
+
+- `MarkdownDocumentReader` already splits per heading, and these docs have ~25-60 token sections, so 800 vs 64 changes
+  nothing (same 15 chunks, score differences are embedding noise).
+- 32:8 gave the best top-1 scores and a bigger gap to #2 for "launch vs async" (0.482 vs 0.367).
+- 16:0 fragments sentences (avg hit 50-80 chars): scores bunch together (0.416 vs 0.414 for launch/async), so top-k
+  gets less selective and citations lose context. Higher similarity score alone does not mean a better answer.
+- Note: `withMinChunkSizeChars` defaults to 350 chars, which would hide small chunk sizes; `DocsService` lowers it.
+
+**What exists in the 2.1.0-RC2 jars** (checked before use): `org.springframework.ai.decision.DecisionModel` (+ `DecisionPrompt`,
+`DecisionResponse`, `YesNoQuestion`/`ScoreQuestion`/`ChoiceQuestion`, `FieldsInput`), `org.springframework.ai.openai.OpenAiDecisionModel`
+(auto-configured by `OpenAiDecisionAutoConfiguration`), `org.springframework.ai.rag.postretrieval.document.DecisionDocumentReranker`
+and `DecisionDocumentFilter`. The sufficiency gate is our own small `DocumentPostProcessor` on the same `DecisionModel`.
+
+**Gotchas found on the way**
+- Post-processors receive the *original* user text, not the rewritten follow-up. `FollowUpQueryTransformer` stores the
+  rewrite in the request context and `PipelineStep` hands that to the decision steps ("its subclasses" is unjudgeable alone).
+- `ContextualQueryAugmenter` renders the empty-context template without `{query}`, so a fallback answer needs a wrapper
+  (`GroundedOrFallbackAugmenter`).
+- `DecisionDocumentFilter` keeps `CONFLICTING` chunks (marked in `classification`); only `EXCLUDED` ones are dropped.
+- Generation is still gpt-4o-mini: for "can sealed subclasses live in another file?" it now answers "No" from the doc's
+  "same module and package" sentence (the doc never mentions files). That's a model/doc gap, not retrieval; F4 evals should catch it.

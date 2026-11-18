@@ -16,6 +16,10 @@ class FollowUpQueryTransformer(private val delegate: QueryTransformer) : QueryTr
         // history = the prompt messages: system + earlier turns + the current user message
         val earlierTurns = query.history().count { it.messageType == MessageType.ASSISTANT }
         if (earlierTurns == 0) return query
-        return delegate.transform(query).also { log.info("Rewrote follow-up '{}' -> '{}'", query.text(), it.text()) }
+        return delegate.transform(query).also {
+            log.info("Rewrote follow-up '{}' -> '{}'", query.text(), it.text())
+            // F3: post-processors only get the original text; leave the rewrite where PipelineStep can find it
+            RagContext.put(query, RagContext.REWRITTEN_QUERY, it.text())
+        }
     }
 }

@@ -1,5 +1,6 @@
 package dev.havlicek.rag
 
+import com.fasterxml.jackson.annotation.JsonValue
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.client.ChatClientResponse
 import org.springframework.ai.document.Document
@@ -14,41 +15,93 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class SourceRef(val source: String?, val score: Double?)
-data class RagAnswer(val answer: String, val sources: List<SourceRef>, val conversationId: String)
+
+/** F3: how the answer was produced. */
+enum class AnswerType(@get:JsonValue val wire: String) {
+    /** answered from retrieved chunks, with [n] citations */
+    GROUNDED("grounded"),
+    /** nothing (sufficient) retrieved, answered from the model's general knowledge, labeled */
+    GENERAL_KNOWLEDGE_FALLBACK("general_knowledge_fallback"),
+    /** nothing retrieved and the fallback is off (rag.sufficiency.enabled=false) -> fixed refusal */
+    NO_CONTEXT("no_context"),
+}
+
+data class RagAnswer(
+    val answer: String,
+    val sources: List<SourceRef>,
+    val conversationId: String,
+    // F3
+    val answerType: AnswerType = AnswerType.GROUNDED,
+    val citations: List<Citation> = emptyList(),
+    /** probability from the sufficiency gate (null when it did not run) */
+    val sufficiency: Double? = null,
+    /** which post-processing steps ran, their latency and the chunks that survived */
+    val pipeline: List<StepTrace> = emptyList(),
+)
+
 data class HistoryMessage(val role: String, val text: String)
 
 /** Token wrapped in JSON: SSE clients strip one leading space after "data:", which would eat spaces between words. */
 data class TokenChunk(val text: String)
 
+/** F3: everything about one /chat request besides the question. */
+data class AskOptions(
+    val filter: RetrievalFilter = RetrievalFilter(),
+    val conversationId: String? = null,
+    /** null = use rag.rerank.enabled */
+    val rerank: Boolean? = null,
+    /** null = use rag.decision-filter.enabled */
+    val decisionFilter: Boolean? = null,
+)
+
 @Service
 class ChatService(
     private val chatClient: ChatClient,
     private val sessionService: SessionService,
+    private val props: RagProperties,
 ) {
 
     /**
-     * Grounded answer plus the retrieved chunks. Pass the returned [RagAnswer.conversationId] back
+     * Grounded answer with numbered citations. Pass the returned [RagAnswer.conversationId] back
      * to continue the same conversation (F1); omit it to start a new one.
-     * [source] optionally limits retrieval to one doc file (e.g. "coroutines.md").
      */
-    fun ask(question: String, source: String? = null, conversationId: String? = null): RagAnswer {
-        val id = conversationId ?: newConversationId()
-        val response = prompt(question, source, id).call().chatClientResponse()
-        return RagAnswer(answer = response.text(), sources = response.sources(), conversationId = id)
+    fun ask(question: String, options: AskOptions = AskOptions()): RagAnswer {
+        val id = options.conversationId ?: newConversationId()
+        val response = prompt(question, options, id).call().chatClientResponse()
+        val documents = response.documents()
+        val type = answerType(documents)
+        val text = response.text()
+        return RagAnswer(
+            answer = label(type) + text,
+            sources = documents.map { SourceRef(it.metadata["source"]?.toString(), it.score) },
+            conversationId = id,
+            answerType = type,
+            citations = Citations.from(documents, text),
+            sufficiency = response.context()[RagContext.SUFFICIENCY] as? Double,
+            pipeline = RagContext.trace(response.context()),
+        )
     }
 
     /**
      * Same RAG + session pipeline, streamed as Server-Sent Events:
-     * `conversation` (id), `sources` (once retrieval is done), many `token` events, then `done`.
+     * `conversation` (id), then once retrieval is done `sources`, `answerType` and `citations` (F3; `cited` is
+     * unknown while streaming, so always false), many `token` events (the fallback label first), then `done`.
      * Errors become an `error` event instead of a broken connection.
      */
-    fun stream(question: String, source: String? = null, conversationId: String? = null): Flux<ServerSentEvent<Any>> {
-        val id = conversationId ?: newConversationId()
-        val sourcesSent = AtomicBoolean(false)
-        val tokens = prompt(question, source, id).stream().chatClientResponse()
+    fun stream(question: String, options: AskOptions = AskOptions()): Flux<ServerSentEvent<Any>> {
+        val id = options.conversationId ?: newConversationId()
+        val retrievalSent = AtomicBoolean(false)
+        val tokens = prompt(question, options, id).stream().chatClientResponse()
             .concatMap { chunk ->
                 val events = buildList {
-                    if (sourcesSent.compareAndSet(false, true)) add(event("sources", chunk.sources()))
+                    if (retrievalSent.compareAndSet(false, true)) {
+                        val documents = chunk.documents()
+                        val type = answerType(documents)
+                        add(event("sources", documents.map { SourceRef(it.metadata["source"]?.toString(), it.score) }))
+                        add(event("answerType", mapOf("answerType" to type)))
+                        add(event("citations", Citations.from(documents, "")))
+                        label(type).takeIf { it.isNotEmpty() }?.let { add(event("token", TokenChunk(it))) }
+                    }
                     chunk.text().takeIf { it.isNotEmpty() }?.let { add(event("token", TokenChunk(it))) }
                 }
                 Flux.fromIterable(events)
@@ -68,23 +121,37 @@ class ChatService(
 
     fun forget(conversationId: String) = sessionService.delete(conversationId)
 
-    private fun prompt(question: String, source: String?, conversationId: String) =
+    internal fun answerType(documents: List<Document>): AnswerType = when {
+        documents.isNotEmpty() -> AnswerType.GROUNDED
+        props.sufficiency.enabled -> AnswerType.GENERAL_KNOWLEDGE_FALLBACK
+        else -> AnswerType.NO_CONTEXT
+    }
+
+    private fun prompt(question: String, options: AskOptions, conversationId: String) =
         chatClient.prompt()
             .user(question)
             .advisors(SessionAdvisors.session(conversationId))
             .advisors { spec ->
-                if (source != null) spec.param(VectorStoreDocumentRetriever.FILTER_EXPRESSION, "source == '$source'")
+                // F3: typed Filter.Expression (FilterExpressionBuilder) instead of string concatenation
+                options.filter.toExpression()?.let { spec.param(VectorStoreDocumentRetriever.FILTER_EXPRESSION, it) }
+                options.rerank?.let { spec.param(RagContext.RERANK, it) }
+                options.decisionFilter?.let { spec.param(RagContext.DECISION_FILTER, it) }
             }
 
     private fun newConversationId() = UUID.randomUUID().toString()
 
     private fun event(name: String, data: Any): ServerSentEvent<Any> =
         ServerSentEvent.builder(data).event(name).build()
+
+    companion object {
+        const val FALLBACK_LABEL = "[General knowledge - not from your docs] "
+
+        fun label(type: AnswerType) = if (type == AnswerType.GENERAL_KNOWLEDGE_FALLBACK) FALLBACK_LABEL else ""
+    }
 }
 
 private fun ChatClientResponse.text(): String = chatResponse()?.result?.output?.text.orEmpty()
 
 @Suppress("UNCHECKED_CAST")
-private fun ChatClientResponse.sources(): List<SourceRef> =
-    (context()[RetrievalAugmentationAdvisor.DOCUMENT_CONTEXT] as? List<Document> ?: emptyList())
-        .map { SourceRef(it.metadata["source"]?.toString(), it.score) }
+private fun ChatClientResponse.documents(): List<Document> =
+    context()[RetrievalAugmentationAdvisor.DOCUMENT_CONTEXT] as? List<Document> ?: emptyList()

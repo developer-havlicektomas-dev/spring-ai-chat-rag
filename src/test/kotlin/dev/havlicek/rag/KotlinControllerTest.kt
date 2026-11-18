@@ -51,22 +51,26 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `ask returns the answer with sources`() {
-        given(chatService.ask("What is a data class?", null, null))
-            .willReturn(RagAnswer("A class holding data.", listOf(SourceRef("data-classes.md", 0.82)), "c-1"))
+        given(chatService.ask("What is a data class?", AskOptions()))
+            .willReturn(RagAnswer("A class holding data [1].", listOf(SourceRef("data-classes.md", 0.82)), "c-1",
+                citations = listOf(Citation(1, "data-classes.md", "classes", 0, "id-1", 0.82, null, null, "A data class...", true))))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":"  What is a data class?  "}"""
         }.andExpect {
             status { isOk() }
-            jsonPath("$.answer") { value("A class holding data.") }
+            jsonPath("$.answer") { value("A class holding data [1].") }
             jsonPath("$.sources[0].source") { value("data-classes.md") }
             jsonPath("$.conversationId") { value("c-1") }
+            jsonPath("$.answerType") { value("grounded") }
+            jsonPath("$.citations[0].n") { value(1) }
+            jsonPath("$.citations[0].chunkIndex") { value(0) }
         }
     }
 
     @Test
     fun `ask passes the source filter`() {
-        given(chatService.ask("launch vs async?", "coroutines.md", null)).willReturn(RagAnswer("Use async for results.", emptyList(), "c-2"))
+        given(chatService.ask("launch vs async?", AskOptions(RetrievalFilter(listOf("coroutines.md"))))).willReturn(RagAnswer("Use async for results.", emptyList(), "c-2"))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":"launch vs async?","source":"coroutines.md"}"""
@@ -74,6 +78,50 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             status { isOk() }
             jsonPath("$.answer") { value("Use async for results.") }
         }
+    }
+
+    @Test
+    fun `ask passes metadata filters and decision overrides`() {
+        val options = AskOptions(RetrievalFilter(listOf("data-classes.md", "sealed-classes.md"), listOf("classes")), null, rerank = true, decisionFilter = false)
+        given(chatService.ask("copy()?", options)).willReturn(
+            RagAnswer("[General knowledge - not from your docs] ...", emptyList(), "c-3", AnswerType.GENERAL_KNOWLEDGE_FALLBACK, sufficiency = 0.2)
+        )
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"copy()?","sources":["data-classes.md","sealed-classes.md"],"topics":["classes"],"rerank":true,"decisionFilter":false}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.answerType") { value("general_knowledge_fallback") }
+            jsonPath("$.sufficiency") { value(0.2) }
+        }
+    }
+
+    @Test
+    fun `invalid topic is a bad request with a message`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"hi","topics":["classes' || true"]}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("Invalid topic")) }
+        }
+    }
+
+    @Test
+    fun `invalid source in list is a bad request`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"hi","sources":["../secrets"]}"""
+        }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `too many sources is a bad request`() {
+        val many = (1..11).joinToString(",") { "\"d$it.md\"" }
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"hi","sources":[$many]}"""
+        }.andExpect { status { isBadRequest() } }
     }
 
     @Test
@@ -94,7 +142,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `ask continues a conversation`() {
-        given(chatService.ask("And how do I make one?", null, "c-1")).willReturn(RagAnswer("Use sealed class.", emptyList(), "c-1"))
+        given(chatService.ask("And how do I make one?", AskOptions(conversationId = "c-1"))).willReturn(RagAnswer("Use sealed class.", emptyList(), "c-1"))
         mvc.post("/kotlin/chat/ask") {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":"And how do I make one?","conversationId":"c-1"}"""
@@ -138,7 +186,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `stream emits server-sent events`() {
-        given(chatService.stream("What is a data class?", null, null)).willReturn(
+        given(chatService.stream("What is a data class?", AskOptions())).willReturn(
             Flux.just(
                 ServerSentEvent.builder<Any>(TokenChunk(" class")).event("token").build(),
                 ServerSentEvent.builder<Any>("[DONE]").event("done").build(),

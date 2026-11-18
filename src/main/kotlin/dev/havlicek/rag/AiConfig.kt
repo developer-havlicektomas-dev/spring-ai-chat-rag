@@ -3,6 +3,7 @@ package dev.havlicek.rag
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor
 import org.springframework.ai.chat.prompt.PromptTemplate
+import org.springframework.ai.decision.DecisionModel
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor
 import org.springframework.ai.rag.generation.augmentation.ContextualQueryAugmenter
 import org.springframework.ai.rag.preretrieval.query.transformation.CompressionQueryTransformer
@@ -37,16 +38,19 @@ class AiConfig {
             .build()
 
     /**
-     * Modular RAG: rewrite follow-ups -> retrieve from Qdrant -> augment the user message.
+     * Modular RAG: rewrite follow-ups -> retrieve from Qdrant (optional metadata filter) -> F3 post-process
+     * (decision filter -> decision reranker -> sufficiency gate) -> augment the user message with numbered chunks.
      * Replaces the monolithic QuestionAnswerAdvisor from Days 4-7.
      */
     @Bean
     fun ragAdvisor(
         builder: ChatClient.Builder,
         vectorStore: VectorStore,
+        decisionModel: DecisionModel, // F3: auto-configured OpenAiDecisionModel (OpenAI Decisions API)
         props: RagProperties,
         @Value("classpath:prompts/rag-prompt.st") ragPrompt: Resource,
         @Value("classpath:prompts/rag-empty-context.st") emptyPrompt: Resource,
+        @Value("classpath:prompts/rag-fallback.st") fallbackPrompt: Resource,
     ): RetrievalAugmentationAdvisor =
         RetrievalAugmentationAdvisor.builder()
             // "And how do I make one?" -> "How do I create a sealed class in Kotlin?" (only when there is history)
@@ -60,11 +64,18 @@ class AiConfig {
                     .similarityThreshold(props.similarityThreshold)
                     .build()
             )
+            // F3: each step is toggled by rag.* config (and per request for rerank/decision-filter)
+            .documentPostProcessors(DecisionSteps.build(decisionModel, props))
             .queryAugmenter(
-                ContextualQueryAugmenter.builder()
-                    .promptTemplate(PromptTemplate(ragPrompt))               // needs {query} and {context}
-                    .emptyContextPromptTemplate(PromptTemplate(emptyPrompt)) // used when nothing passes the threshold
-                    .build()
+                GroundedOrFallbackAugmenter(
+                    ContextualQueryAugmenter.builder()
+                        .promptTemplate(PromptTemplate(ragPrompt))               // needs {query} and {context}
+                        .emptyContextPromptTemplate(PromptTemplate(emptyPrompt)) // hard refusal when the gate is off
+                        .documentFormatter(Citations::formatContext)             // F3: "[1] (coroutines.md#0)\n..."
+                        .build(),
+                    // F3: empty or insufficient context -> labeled general-knowledge answer instead of the refusal
+                    fallback = PromptTemplate(fallbackPrompt).takeIf { props.sufficiency.enabled },
+                )
             )
             .build()
 

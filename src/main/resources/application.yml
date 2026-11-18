@@ -26,9 +26,26 @@ rag:
   session-ttl-minutes: ${RAG_SESSION_TTL_MINUTES:60}
   max-turns: ${RAG_MAX_TURNS:10}
   keep-turns: ${RAG_KEEP_TURNS:6}
+  # F3: chunking (re-run POST /kotlin/docs/ingest after changing; the ingest endpoint also takes ?chunkSize=&chunkOverlap=)
+  chunk-size: ${RAG_CHUNK_SIZE:800}
+  chunk-overlap: ${RAG_CHUNK_OVERLAP:0}
+  # F3: Spring AI 2.1 DecisionModel post-processors (OpenAI Decisions API); per request: "rerank" / "decisionFilter"
+  rerank:
+    enabled: ${RAG_RERANK_ENABLED:false}
+    top-n: ${RAG_RERANK_TOP_N:3}
+    min-score: ${RAG_RERANK_MIN_SCORE:0.1}
+  decision-filter:
+    enabled: ${RAG_DECISION_FILTER_ENABLED:false}
+    fail-closed: ${RAG_DECISION_FILTER_FAIL_CLOSED:false}
+  # F3: "is the retrieved context sufficient?" gate -> labeled general-knowledge fallback instead of a refusal
+  sufficiency:
+    enabled: ${RAG_SUFFICIENCY_ENABLED:true}
+    min-probability: ${RAG_SUFFICIENCY_MIN_PROBABILITY:0.5}
+  decision-timeout-seconds: ${RAG_DECISION_TIMEOUT_SECONDS:20}
 
 logging:
   level:
     # set to DEBUG to see the full RAG prompt incl. retrieved chunks
     org.springframework.ai.chat.client.advisor: ${ADVISOR_LOG_LEVEL:INFO}
     org.springframework.ai.rag: ${ADVISOR_LOG_LEVEL:INFO}
+    org.springframework.ai.openai.OpenAiDecisionModel: ${DECISION_LOG_LEVEL:INFO}

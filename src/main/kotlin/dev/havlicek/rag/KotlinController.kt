@@ -16,7 +16,15 @@ data class AskRequest(
     @Pattern(regexp = "[A-Za-z0-9_-]+\\.md") val source: String? = null,
     // F1: pass the id from a previous answer to continue that conversation
     @Pattern(regexp = "[A-Za-z0-9-]{1,64}") val conversationId: String? = null,
-)
+    // F3: richer metadata filter (validated in RetrievalFilter): source IN sources AND topic IN topics
+    @Size(max = RetrievalFilter.MAX_VALUES) val sources: List<String>? = null,
+    @Size(max = RetrievalFilter.MAX_VALUES) val topics: List<String>? = null,
+    // F3: per-request override of rag.rerank.enabled / rag.decision-filter.enabled
+    val rerank: Boolean? = null,
+    val decisionFilter: Boolean? = null,
+) {
+    fun toOptions() = AskOptions(RetrievalFilter.of(source, sources, topics), conversationId, rerank, decisionFilter)
+}
 
 data class OpsRequest(
     @NotBlank @Size(max = 2000) val message: String,
@@ -43,8 +51,10 @@ class KotlinController(
     private val koogAgentService: KoogAgentService,
     private val opsAgentService: OpsAgentService,
 ) {
+    /** F3: optional ?chunkSize=&chunkOverlap= override rag.chunk-size / rag.chunk-overlap for this run (chunk experiment). */
     @PostMapping("/docs/ingest")
-    fun ingest(): Map<String, Int> = docsService.ingest()
+    fun ingest(@RequestParam chunkSize: Int?, @RequestParam chunkOverlap: Int?): Map<String, Int> =
+        docsService.ingest(docsService.chunkSettings(chunkSize, chunkOverlap))
 
     @GetMapping("/docs/search")
     fun search(@RequestParam q: String, @RequestParam(defaultValue = "4") k: Int): List<SearchHit> =
@@ -52,12 +62,12 @@ class KotlinController(
 
     @PostMapping("/chat/ask")
     fun ask(@Valid @RequestBody request: AskRequest): RagAnswer =
-        chatService.ask(request.question.trim(), request.source, request.conversationId)
+        chatService.ask(request.question.trim(), request.toOptions())
 
     /** Streaming variant of /chat/ask (Server-Sent Events). Try: curl -N ... */
     @PostMapping("/chat/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
     fun stream(@Valid @RequestBody request: AskRequest): Flux<ServerSentEvent<Any>> =
-        chatService.stream(request.question.trim(), request.source, request.conversationId)
+        chatService.stream(request.question.trim(), request.toOptions())
 
     /** F1: messages the session currently sends to the model (after compaction). */
     @GetMapping("/chat/sessions/{id}")
@@ -88,6 +98,11 @@ class KotlinController(
     @PostMapping("/ops/confirm")
     fun opsConfirm(@Valid @RequestBody request: ConfirmRequest): OpsAnswer =
         opsAgentService.confirm(request.conversationId, request.approve, request.toolCallIds, request.reason?.trim())
+
+    /** F3: bad metadata filter values or chunk settings. */
+    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class)
+    fun badRequest(e: RuntimeException): ResponseEntity<Map<String, String?>> =
+        ResponseEntity.badRequest().body(mapOf("error" to e.message))
 
     @ExceptionHandler(ConversationStateException::class)
     fun conflict(e: ConversationStateException): ResponseEntity<Map<String, String?>> =
