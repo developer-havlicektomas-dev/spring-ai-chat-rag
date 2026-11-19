@@ -24,6 +24,18 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
     @MockitoBean lateinit var koogBridgeService: KoogBridgeService
     @MockitoBean lateinit var koogAgentService: KoogAgentService
     @MockitoBean lateinit var opsAgentService: OpsAgentService
+    @MockitoBean lateinit var ragEvalRunner: RagEvalRunner
+
+    @Test
+    fun `unknown eval variant is a bad request`() {
+        mvc.post("/kotlin/evals/run") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"variants":["baseline","turbo"]}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("turbo")) }
+        }
+    }
 
     @Test
     fun `ops ask returns pending tool calls`() {

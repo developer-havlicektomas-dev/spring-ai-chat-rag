@@ -237,3 +237,38 @@ and `DecisionDocumentFilter`. The sufficiency gate is our own small `DocumentPos
 - `DecisionDocumentFilter` keeps `CONFLICTING` chunks (marked in `classification`); only `EXCLUDED` ones are dropped.
 - Generation is still gpt-4o-mini: for "can sealed subclasses live in another file?" it now answers "No" from the doc's
   "same module and package" sentence (the doc never mentions files). That's a model/doc gap, not retrieval; F4 evals should catch it.
+
+## F4 RAG evals (Spring AI 2.1)
+
+Golden set: `src/main/resources/evals/golden-qa.json` (18 questions: 15 answerable from `docs/`, 3 out of scope that must
+get the labeled general-knowledge fallback). Each question runs through the real `/chat/ask` pipeline per variant
+(`baseline` = decision steps off, `rerank`, `filter`, `full` = filter + reranker) and is scored by LLM judges:
+
+| column | how |
+|---|---|
+| routing | in scope -> `grounded`, out of scope -> `general_knowledge_fallback` |
+| retrieval hit | an expected source is among the chunks the model saw |
+| relevancy | `RelevancyEvaluator(question, context, answer)` |
+| grounded | `FactCheckingEvaluator(context -> answer)`: every claim backed by the chunks |
+| correct | `FactCheckingEvaluator(answer -> reference)`: the answer contains the reference facts |
+| decision ms / tokens / $ | from the `pipeline` trace and the answer call's token usage (decision + judge calls not priced) |
+
+```bash
+SPRING_DOCKER_COMPOSE_ENABLED=false ./gradlew evalRag                      # baseline vs full, prints table
+./gradlew evalRag -PevalVariants=baseline,rerank,filter,full -PevalLimit=5   # on the Mac compose starts Qdrant
+EVAL_JUDGE_MODEL=gpt-4.1 ./gradlew evalRag                                   # stronger judge than the answer model
+curl -s -X POST localhost:8080/kotlin/evals/run -H 'Content-Type: application/json' \
+  -d '{"variants":["baseline","full"],"ids":["mix-result","oos-chitchat"]}' | jq .summaries
+```
+
+First run (2026-11-19, gpt-4o-mini answers and judge):
+
+| variant | routing | retrieval hit | relevancy | grounded | correct | avg ms | p95 ms | decision ms | tokens in/out |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 100% | 100% | 100% | 100% | 100% | 1918 | 3041 | 132 | 309/101 |
+| full | 100% | 100% | 100% | 100% | 100% | 2320 | 3914 | 477 | 236/100 |
+
+Takeaway: on 4 tiny docs, quality is at the ceiling either way. The decision steps cost about +400 ms per question and
+remove off-topic chunks (24% fewer prompt tokens, cleaner sources), but they don't improve answers here. To make the
+comparison mean something, add harder questions and more (and overlapping) docs. Sanity check: changing one reference to
+a wrong fact flips `correct` to N, so the judge isn't just saying yes to everything.

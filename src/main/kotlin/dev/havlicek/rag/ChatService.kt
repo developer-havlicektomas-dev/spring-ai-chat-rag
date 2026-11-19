@@ -37,7 +37,15 @@ data class RagAnswer(
     val sufficiency: Double? = null,
     /** which post-processing steps ran, their latency and the chunks that survived */
     val pipeline: List<StepTrace> = emptyList(),
+    /** F4: tokens of the answer call (not the decision/judge calls); null if the provider did not report usage */
+    val usage: TokenUsage? = null,
 )
+
+/** F4: [RagAnswer] plus the post-processed chunks that went into the prompt. */
+data class AnswerWithContext(val answer: RagAnswer, val documents: List<Document>)
+
+/** F4: prompt/completion tokens of one chat call. */
+data class TokenUsage(val promptTokens: Int, val completionTokens: Int)
 
 data class HistoryMessage(val role: String, val text: String)
 
@@ -65,13 +73,16 @@ class ChatService(
      * Grounded answer with numbered citations. Pass the returned [RagAnswer.conversationId] back
      * to continue the same conversation (F1); omit it to start a new one.
      */
-    fun ask(question: String, options: AskOptions = AskOptions()): RagAnswer {
+    fun ask(question: String, options: AskOptions = AskOptions()): RagAnswer = askWithContext(question, options).answer
+
+    /** F4: the answer plus the exact chunks the model saw, so evaluators can judge the answer against them. */
+    fun askWithContext(question: String, options: AskOptions = AskOptions()): AnswerWithContext {
         val id = options.conversationId ?: newConversationId()
         val response = prompt(question, options, id).call().chatClientResponse()
         val documents = response.documents()
         val type = answerType(documents)
         val text = response.text()
-        return RagAnswer(
+        val answer = RagAnswer(
             answer = label(type) + text,
             sources = documents.map { SourceRef(it.metadata["source"]?.toString(), it.score) },
             conversationId = id,
@@ -79,7 +90,9 @@ class ChatService(
             citations = Citations.from(documents, text),
             sufficiency = response.context()[RagContext.SUFFICIENCY] as? Double,
             pipeline = RagContext.trace(response.context()),
+            usage = response.chatResponse()?.metadata?.usage?.let { TokenUsage(it.promptTokens ?: 0, it.completionTokens ?: 0) },
         )
+        return AnswerWithContext(answer, documents)
     }
 
     /**

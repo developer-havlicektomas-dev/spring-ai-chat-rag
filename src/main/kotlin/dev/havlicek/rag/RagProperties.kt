@@ -22,6 +22,7 @@ data class RagProperties(
     val sufficiency: Sufficiency = Sufficiency(),
     /** F3: per-batch timeout for DecisionModel calls (reranker, filter, gate). */
     val decisionTimeoutSeconds: Long = 20,
+    val eval: EvalSettings = EvalSettings(),
 ) {
     init {
         ChunkSettings(chunkSize, chunkOverlap) // validates
@@ -36,6 +37,21 @@ data class RagProperties(
     /** F3: "is the retrieved context sufficient?" gate; when it says no we answer from general knowledge, labeled. */
     data class Sufficiency(val enabled: Boolean = true, val minProbability: Double = 0.5)
 }
+
+/**
+ * F4: RAG evals. [judgeModel] grades the answers (use a stronger model than the one answering if you can);
+ * prices are USD per 1M tokens of the ANSWER model, used only for the cost column (default: gpt-4o-mini list price).
+ */
+data class EvalSettings(
+    val judgeModel: String = "gpt-4o-mini",
+    val inputPricePer1m: Double = 0.15,
+    val outputPricePer1m: Double = 0.60,
+    /** run the golden set at startup, print the table, write [reportFile] and exit (used by ./gradlew evalRag) */
+    val onStartup: Boolean = false,
+    val variants: List<String> = emptyList(),
+    val limit: Int? = null,
+    val reportFile: String = "build/reports/rag-eval/rag-eval.md",
+)
 
 class InvalidChunkSettingsException(message: String) : RuntimeException(message)
 

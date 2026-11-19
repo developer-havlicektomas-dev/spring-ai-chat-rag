@@ -42,6 +42,11 @@ rag:
     enabled: ${RAG_SUFFICIENCY_ENABLED:true}
     min-probability: ${RAG_SUFFICIENCY_MIN_PROBABILITY:0.5}
   decision-timeout-seconds: ${RAG_DECISION_TIMEOUT_SECONDS:20}
+  # F4: golden-set evals (POST /kotlin/evals/run or ./gradlew evalRag)
+  eval:
+    judge-model: ${EVAL_JUDGE_MODEL:gpt-4o-mini}
+    input-price-per-1m: ${EVAL_INPUT_PRICE_PER_1M:0.15}    # USD, answer model (gpt-4o-mini list price)
+    output-price-per-1m: ${EVAL_OUTPUT_PRICE_PER_1M:0.60}
 
 logging:
   level:

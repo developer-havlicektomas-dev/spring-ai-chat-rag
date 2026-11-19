@@ -64,3 +64,22 @@ kotlin {
 tasks.withType<Test> {
 	useJUnitPlatform()
 }
+
+// F4: ./gradlew evalRag [-PevalVariants=baseline,full] [-PevalLimit=5]
+// Boots the app without the web server, ingests docs, runs src/main/resources/evals/golden-qa.json per variant,
+// prints a score table and writes build/reports/rag-eval/rag-eval.md. Needs OPENAI_API_KEY and Qdrant
+// (on the Mac, compose.yaml starts Qdrant like bootRun does).
+tasks.register<org.springframework.boot.gradle.tasks.run.BootRun>("evalRag") {
+	group = "verification"
+	description = "Runs the RAG golden-set evals and prints a score table"
+	val bootRun = tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun").get()
+	mainClass.set(bootRun.mainClass)
+	classpath = bootRun.classpath
+	workingDir = projectDir
+	args(
+		"--spring.main.web-application-type=none",
+		"--rag.eval.on-startup=true",
+		"--rag.eval.variants=" + (providers.gradleProperty("evalVariants").orNull ?: "baseline,full"),
+	)
+	providers.gradleProperty("evalLimit").orNull?.let { args("--rag.eval.limit=$it") }
+}

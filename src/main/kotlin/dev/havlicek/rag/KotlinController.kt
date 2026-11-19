@@ -40,6 +40,13 @@ data class ConfirmRequest(
     @Size(max = 500) val reason: String? = null,
 )
 
+/** F4: which variants to compare (baseline, rerank, filter, full) and optionally only the first [limit] or some [ids]. */
+data class EvalRequest(
+    @Size(max = 4) val variants: List<String>? = null,
+    @field:jakarta.validation.constraints.Min(1) val limit: Int? = null,
+    val ids: Set<String>? = null,
+)
+
 data class KoogRequest(@NotBlank @Size(max = 2000) val question: String)
 
 @RestController
@@ -50,6 +57,7 @@ class KotlinController(
     private val koogBridgeService: KoogBridgeService,
     private val koogAgentService: KoogAgentService,
     private val opsAgentService: OpsAgentService,
+    private val ragEvalRunner: RagEvalRunner,
 ) {
     /** F3: optional ?chunkSize=&chunkOverlap= override rag.chunk-size / rag.chunk-overlap for this run (chunk experiment). */
     @PostMapping("/docs/ingest")
@@ -99,8 +107,13 @@ class KotlinController(
     fun opsConfirm(@Valid @RequestBody request: ConfirmRequest): OpsAnswer =
         opsAgentService.confirm(request.conversationId, request.approve, request.toolCallIds, request.reason?.trim())
 
-    /** F3: bad metadata filter values or chunk settings. */
-    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class)
+    /** F4: run the golden set (slow: several LLM calls per question). Docs must be ingested. */
+    @PostMapping("/evals/run")
+    fun runEvals(@Valid @RequestBody(required = false) request: EvalRequest?): EvalReport =
+        ragEvalRunner.run(EvalVariant.parse(request?.variants), request?.limit, request?.ids)
+
+    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant. */
+    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class)
     fun badRequest(e: RuntimeException): ResponseEntity<Map<String, String?>> =
         ResponseEntity.badRequest().body(mapOf("error" to e.message))
 
