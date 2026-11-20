@@ -79,6 +79,10 @@ class AiConfig {
             )
             .build()
 
+    /** F5: allow-listed answer models + prices (rag.eval.models). */
+    @Bean
+    fun modelCatalog(props: RagProperties) = ModelCatalog(props.eval.models)
+
     @Bean
     fun chatClient(
         builder: ChatClient.Builder,

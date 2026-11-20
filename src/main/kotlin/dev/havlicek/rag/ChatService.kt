@@ -39,6 +39,8 @@ data class RagAnswer(
     val pipeline: List<StepTrace> = emptyList(),
     /** F4: tokens of the answer call (not the decision/judge calls); null if the provider did not report usage */
     val usage: TokenUsage? = null,
+    /** F5: model that produced the answer, as reported by the provider (e.g. "gpt-4.1-mini-2025-04-14") */
+    val model: String? = null,
 )
 
 /** F4: [RagAnswer] plus the post-processed chunks that went into the prompt. */
@@ -60,6 +62,8 @@ data class AskOptions(
     val rerank: Boolean? = null,
     /** null = use rag.decision-filter.enabled */
     val decisionFilter: Boolean? = null,
+    /** F5: answer-model override (must be in rag.eval.models); null = spring.ai.openai.chat.options.model */
+    val model: String? = null,
 )
 
 @Service
@@ -67,6 +71,7 @@ class ChatService(
     private val chatClient: ChatClient,
     private val sessionService: SessionService,
     private val props: RagProperties,
+    private val models: ModelCatalog,
 ) {
 
     /**
@@ -91,6 +96,7 @@ class ChatService(
             sufficiency = response.context()[RagContext.SUFFICIENCY] as? Double,
             pipeline = RagContext.trace(response.context()),
             usage = response.chatResponse()?.metadata?.usage?.let { TokenUsage(it.promptTokens ?: 0, it.completionTokens ?: 0) },
+            model = response.chatResponse()?.metadata?.model,
         )
         return AnswerWithContext(answer, documents)
     }
@@ -143,6 +149,8 @@ class ChatService(
     private fun prompt(question: String, options: AskOptions, conversationId: String) =
         chatClient.prompt()
             .user(question)
+            // F5: only the answer call switches model; ChatClient merges these over the default options
+            .apply { options.model?.let { options(models.chatOptions(it)) } }
             .advisors(SessionAdvisors.session(conversationId))
             .advisors { spec ->
                 // F3: typed Filter.Expression (FilterExpressionBuilder) instead of string concatenation

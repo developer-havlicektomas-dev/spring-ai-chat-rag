@@ -18,14 +18,16 @@ repositories {
 	mavenCentral()
 }
 
-// F1: Spring AI 2.1 is still RC (no GA on Maven Central as of 2026-11-16), so this lives on a branch.
-extra["springAiVersion"] = "2.1.0-RC2"
+// F1: started on 2.1.0-RC2; F5: 2.1.0 GA landed on Maven Central on 2026-11-19, upgraded (no code changes needed).
+extra["springAiVersion"] = "2.1.0"
 val koogVersion = "1.3.0"
 val koogSpringAiVersion = "1.3.0-beta"
 
 dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
 	implementation("org.springframework.boot:spring-boot-starter-validation")
+	// F5: Micrometer + /actuator/metrics (Spring AI publishes gen_ai.client.token.usage per model)
+	implementation("org.springframework.boot:spring-boot-starter-actuator")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("org.springframework.ai:spring-ai-starter-model-openai")
 	implementation("org.springframework.ai:spring-ai-starter-vector-store-qdrant")
@@ -66,6 +68,7 @@ tasks.withType<Test> {
 }
 
 // F4: ./gradlew evalRag [-PevalVariants=baseline,full] [-PevalLimit=5]
+// F5: [-PevalModels=gpt-4o-mini,gpt-4.1-mini] [-PevalDifficulty=hard] -> also build/reports/rag-eval/model-comparison.md
 // Boots the app without the web server, ingests docs, runs src/main/resources/evals/golden-qa.json per variant,
 // prints a score table and writes build/reports/rag-eval/rag-eval.md. Needs OPENAI_API_KEY and Qdrant
 // (on the Mac, compose.yaml starts Qdrant like bootRun does).
@@ -79,7 +82,11 @@ tasks.register<org.springframework.boot.gradle.tasks.run.BootRun>("evalRag") {
 	args(
 		"--spring.main.web-application-type=none",
 		"--rag.eval.on-startup=true",
-		"--rag.eval.variants=" + (providers.gradleProperty("evalVariants").orNull ?: "baseline,full"),
+		// comparing models: one variant by default, otherwise the F4 baseline vs full comparison
+		"--rag.eval.variants=" + (providers.gradleProperty("evalVariants").orNull
+			?: if (providers.gradleProperty("evalModels").isPresent) "baseline" else "baseline,full"),
 	)
 	providers.gradleProperty("evalLimit").orNull?.let { args("--rag.eval.limit=$it") }
+	providers.gradleProperty("evalModels").orNull?.let { args("--rag.eval.compare-models=$it") }
+	providers.gradleProperty("evalDifficulty").orNull?.let { args("--rag.eval.difficulty=$it") }
 }

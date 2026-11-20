@@ -30,7 +30,7 @@ class RagEvalTest {
     private fun judge(pass: Boolean) = Evaluator { EvaluationResponse(pass, "", emptyMap()) }
 
     private fun runner(asker: RagAsker, relevancy: Evaluator = judge(true), factCheck: Evaluator = judge(true), forgotten: MutableList<String> = mutableListOf()) =
-        RagEvalRunner(listOf(inScope, outOfScope), asker, relevancy, factCheck, EvalPricing(0.15, 0.60), "judge", "answer") { forgotten += it }
+        RagEvalRunner(listOf(inScope, outOfScope), asker, relevancy, factCheck, ModelCatalog(listOf(EvalModel("answer", 0.15, 0.60))), "judge", "answer") { forgotten += it }
 
     @Test
     fun `grounded in-scope answer with the expected source scores everything`() {
@@ -80,7 +80,7 @@ class RagEvalTest {
         assertEquals(1.0, s.relevancy)
         // 1000 in * 0.15/1M + 100 out * 0.60/1M = 0.00021 per answer -> 0.21 per 1k
         assertEquals(0.21, s.estAnswerCostUsdPer1k!!, 1e-9)
-        assertTrue(report.table.contains("| baseline | 2 | 100% | 0% |"))
+        assertTrue(report.table.contains("| answer | baseline | 2 | 100% | 0% |"))
     }
 
     @Test
@@ -91,9 +91,13 @@ class RagEvalTest {
     }
 
     @Test
-    fun `golden set has 15-20 unique cases whose expected sources exist`() {
+    fun `golden set has unique cases whose expected sources exist, incl hard ones`() {
         val cases = javaClass.getResourceAsStream("/evals/golden-qa.json")!!.use(GoldenSet::load)
-        assertTrue(cases.size in 15..20, "size ${cases.size}")
+        assertTrue(cases.size in 25..35, "size ${cases.size}")
+        // F5: hard cases separate the models; some of them must be near-miss out-of-scope questions
+        val hard = cases.filter { it.difficulty == "hard" }
+        assertTrue(hard.size >= 8 && hard.any { !it.inScope }, "hard ${hard.map { it.id }}")
+        assertTrue(cases.all { it.difficulty in setOf("normal", "hard") })
         assertEquals(cases.size, cases.map { it.id }.toSet().size)
         val docs = PathMatchingResourcePatternResolver().getResources("classpath:docs/*.md").map { it.filename }.toSet()
         cases.filter { it.inScope }.forEach { c ->

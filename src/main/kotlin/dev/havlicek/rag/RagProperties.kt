@@ -39,18 +39,23 @@ data class RagProperties(
 }
 
 /**
- * F4: RAG evals. [judgeModel] grades the answers (use a stronger model than the one answering if you can);
- * prices are USD per 1M tokens of the ANSWER model, used only for the cost column (default: gpt-4o-mini list price).
+ * F4: RAG evals. [judgeModel] grades the answers (F5: fixed across the compared models so scores stay comparable,
+ * and stronger than the models it grades).
  */
 data class EvalSettings(
-    val judgeModel: String = "gpt-4o-mini",
-    val inputPricePer1m: Double = 0.15,
-    val outputPricePer1m: Double = 0.60,
+    val judgeModel: String = "gpt-4.1",
+    /** F5: answer models that may be used (per-request override + comparison) with their prices; see application.yml */
+    val models: List<EvalModel> = emptyList(),
+    /** F5: models to compare in the startup run (./gradlew evalRag -PevalModels=a,b); empty = default model only */
+    val compareModels: List<String> = emptyList(),
+    /** F5: only cases with this difficulty ("hard"); null = all */
+    val difficulty: String? = null,
     /** run the golden set at startup, print the table, write [reportFile] and exit (used by ./gradlew evalRag) */
     val onStartup: Boolean = false,
     val variants: List<String> = emptyList(),
     val limit: Int? = null,
     val reportFile: String = "build/reports/rag-eval/rag-eval.md",
+    val comparisonReportFile: String = "build/reports/rag-eval/model-comparison.md",
 )
 
 class InvalidChunkSettingsException(message: String) : RuntimeException(message)

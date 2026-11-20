@@ -21,6 +21,8 @@ data class EvalCase(
     val expectedSources: List<String> = emptyList(),
     /** false = the docs don't cover it; the right behaviour is the labeled general-knowledge fallback */
     val inScope: Boolean = true,
+    /** F5: "normal" (the F4 set) or "hard" (multi-hop, traps, precise details, near-miss out-of-scope) */
+    val difficulty: String = "normal",
 )
 
 object GoldenSet {
@@ -47,7 +49,7 @@ enum class EvalVariant(@get:JsonValue val wire: String, val rerank: Boolean, val
     }
 }
 
-/** F4: scores for one question under one variant. Null = not applicable (e.g. no relevancy for a fallback answer). */
+/** F4: scores for one question under one variant (F5: and one answer model). Null = not applicable. */
 data class CaseResult(
     val id: String,
     val variant: EvalVariant,
@@ -70,6 +72,11 @@ data class CaseResult(
     val sources: List<String>,
     val answer: String,
     val error: String? = null,
+    // F5
+    val model: String = "?",
+    val difficulty: String = "normal",
+    /** USD of the answer call from its real token usage; null = no usage or unknown price */
+    val costUsd: Double? = null,
 )
 
 data class VariantSummary(
@@ -85,14 +92,25 @@ data class VariantSummary(
     val avgDecisionMs: Long,
     val avgPromptTokens: Int?,
     val avgCompletionTokens: Int?,
-    /** answer call only, from rag.eval.*-price-per-1m; decision + judge calls are not included */
+    /** answer call only, mean real per-question cost x 1000; decision + judge calls are not included */
     val estAnswerCostUsdPer1k: Double?,
     val errors: Int,
+    // F5
+    val model: String = "?",
+    val p50LatencyMs: Long = 0,
+    /** correctness on difficulty=hard cases only (the F4 set is too easy to separate models) */
+    val hardCorrectness: Double? = null,
 )
 
-data class EvalReport(val answerModel: String, val judgeModel: String, val summaries: List<VariantSummary>, val cases: List<CaseResult>, val table: String)
-
-data class EvalPricing(val inputPer1m: Double, val outputPer1m: Double)
+data class EvalReport(
+    val answerModel: String,
+    val judgeModel: String,
+    val summaries: List<VariantSummary>,
+    val cases: List<CaseResult>,
+    val table: String,
+    /** F5: one row per model x variant (markdown) */
+    val comparison: String = "",
+)
 
 /** Asks the RAG pipeline; separated from ChatService so tests can script it. */
 fun interface RagAsker {
@@ -101,6 +119,7 @@ fun interface RagAsker {
 
 /**
  * F4: runs the golden set through /chat/ask's pipeline per variant and scores each answer with LLM judges.
+ * F5: optionally per answer model too (the judge model stays fixed so scores are comparable across models).
  * Sequential per question (latency stays comparable), the three judge calls run in parallel.
  */
 class RagEvalRunner(
@@ -108,27 +127,44 @@ class RagEvalRunner(
     private val asker: RagAsker,
     private val relevancy: Evaluator,
     private val factCheck: Evaluator,
-    private val pricing: EvalPricing,
+    private val models: ModelCatalog,
     private val judgeModel: String,
+    /** spring.ai.openai.chat.options.model: used (without an override) when no models are requested */
     private val answerModel: String = "?",
     private val forget: (String) -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun run(variants: List<EvalVariant> = EvalVariant.DEFAULT, limit: Int? = null, ids: Set<String>? = null): EvalReport {
-        val selected = cases.filter { ids.isNullOrEmpty() || it.id in ids }.let { if (limit != null) it.take(limit) else it }
-        val results = variants.flatMap { variant -> selected.map { evaluate(it, variant) } }
-        val summaries = variants.map { v -> summarize(v, results.filter { it.variant == v }) }
-        return EvalReport(answerModel, judgeModel, summaries, results, EvalTable.render(summaries, results))
+    fun run(
+        variants: List<EvalVariant> = EvalVariant.DEFAULT,
+        limit: Int? = null,
+        ids: Set<String>? = null,
+        compareModels: List<String> = emptyList(),
+        difficulty: String? = null,
+    ): EvalReport {
+        // validate up front: a typo should be a 400, not 27 failed cases
+        val modelNames: List<String?> = models.parse(compareModels).ifEmpty { listOf(null) }
+        val selected = cases
+            .filter { ids.isNullOrEmpty() || it.id in ids }
+            .filter { difficulty == null || it.difficulty == difficulty }
+            .let { if (limit != null) it.take(limit) else it }
+        val results = modelNames.flatMap { model -> variants.flatMap { variant -> selected.map { evaluate(it, variant, model) } } }
+        val summaries = results.groupBy { it.model to it.variant }.map { (key, rs) -> summarize(key.second, rs, key.first) }
+        return EvalReport(answerModel, judgeModel, summaries, results, EvalTable.render(summaries, results), ModelComparisonTable.render(summaries))
     }
 
-    internal fun evaluate(case: EvalCase, variant: EvalVariant): CaseResult {
+    /** [model] = null -> no override (the configured default answer model). */
+    internal fun evaluate(case: EvalCase, variant: EvalVariant, model: String? = null): CaseResult {
+        val label = model ?: answerModel
         val started = System.nanoTime()
         val result = try {
-            asker.ask(case.question, AskOptions(rerank = variant.rerank, decisionFilter = variant.decisionFilter))
+            asker.ask(case.question, AskOptions(rerank = variant.rerank, decisionFilter = variant.decisionFilter, model = model))
         } catch (e: Exception) {
-            log.warn("eval {} [{}] failed: {}", case.id, variant.wire, e.message)
-            return CaseResult(case.id, variant, null, false, null, null, null, null, ms(started), 0, null, null, emptyList(), "", e.message ?: e.javaClass.simpleName)
+            log.warn("eval {} [{} {}] failed: {}", case.id, label, variant.wire, e.message)
+            return CaseResult(
+                case.id, variant, null, false, null, null, null, null, ms(started), 0, null, null, emptyList(), "",
+                e.message ?: e.javaClass.simpleName, label, case.difficulty,
+            )
         }
         val latency = ms(started)
         val answer = result.answer
@@ -136,7 +172,7 @@ class RagEvalRunner(
         val sources = result.documents.mapNotNull { it.metadata["source"]?.toString() }
         val grounded = answer.answerType == AnswerType.GROUNDED
         val judged = if (case.inScope) judge(case, answer.answer, result.documents.takeIf { grounded }) else Judged()
-        log.info("eval {} [{}] {} {}ms", case.id, variant.wire, answer.answerType.wire, latency)
+        log.info("eval {} [{} {}] {} {}ms", case.id, label, variant.wire, answer.answerType.wire, latency)
         return CaseResult(
             id = case.id,
             variant = variant,
@@ -153,6 +189,9 @@ class RagEvalRunner(
             sources = sources.distinct(),
             answer = answer.answer,
             error = judged.error,
+            model = label,
+            difficulty = case.difficulty,
+            costUsd = answer.usage?.let { models.costUsd(label, it.promptTokens, it.completionTokens) },
         )
     }
 
@@ -181,12 +220,11 @@ class RagEvalRunner(
         Judged(relevant.await(), grounded.await(), correct.await(), errors.joinToString("; ").ifEmpty { null })
     }
 
-    internal fun summarize(variant: EvalVariant, rs: List<CaseResult>): VariantSummary {
+    internal fun summarize(variant: EvalVariant, rs: List<CaseResult>, model: String? = null): VariantSummary {
         val ok = rs.filter { it.error == null || it.answerType != null }
         val latencies = ok.map { it.latencyMs }.sorted()
         val withUsage = ok.filter { it.promptTokens != null }
-        val avgIn = withUsage.takeIf { it.isNotEmpty() }?.map { it.promptTokens!! }?.average()
-        val avgOut = withUsage.takeIf { it.isNotEmpty() }?.map { it.completionTokens ?: 0 }?.average()
+        val costs = withUsage.map { it.costUsd }
         return VariantSummary(
             variant = variant,
             cases = rs.size,
@@ -196,44 +234,69 @@ class RagEvalRunner(
             groundedness = rate(rs.map { it.grounded }),
             correctness = rate(rs.map { it.correct }),
             avgLatencyMs = latencies.average().orZero(),
-            p95LatencyMs = latencies.getOrNull(ceil(latencies.size * 0.95).toInt() - 1) ?: 0,
+            p95LatencyMs = percentile(latencies, 0.95),
             avgDecisionMs = ok.map { it.decisionMs }.average().orZero(),
-            avgPromptTokens = avgIn?.toInt(),
-            avgCompletionTokens = avgOut?.toInt(),
-            estAnswerCostUsdPer1k = if (avgIn != null && avgOut != null)
-                1000 * (avgIn * pricing.inputPer1m + avgOut * pricing.outputPer1m) / 1_000_000 else null,
+            avgPromptTokens = withUsage.takeIf { it.isNotEmpty() }?.map { it.promptTokens!! }?.average()?.toInt(),
+            avgCompletionTokens = withUsage.takeIf { it.isNotEmpty() }?.map { it.completionTokens ?: 0 }?.average()?.toInt(),
+            // any unknown price -> unknown total, never a silently low number
+            estAnswerCostUsdPer1k = costs.takeIf { it.isNotEmpty() && null !in it }?.let { c -> 1000 * c.sumOf { it!! } / c.size },
             errors = rs.count { it.error != null },
+            model = model ?: rs.firstOrNull()?.model ?: answerModel,
+            p50LatencyMs = percentile(latencies, 0.50),
+            hardCorrectness = rate(rs.filter { it.difficulty == "hard" }.map { it.correct }),
         )
     }
 
     private fun rate(values: List<Boolean?>): Double? = values.filterNotNull().takeIf { it.isNotEmpty() }?.let { v -> v.count { it }.toDouble() / v.size }
     private fun Double.orZero(): Long = if (isNaN()) 0 else toLong()
     private fun ms(started: Long) = (System.nanoTime() - started) / 1_000_000
+
+    companion object {
+        /** nearest-rank percentile of an ascending list (p50 of [1,2,3,4] = 2, p95 of 20 values = the 19th) */
+        fun percentile(sorted: List<Long>, p: Double): Long = sorted.getOrNull(ceil(sorted.size * p).toInt() - 1) ?: 0
+    }
 }
 
 /** F4: Markdown tables for the console / README / build/reports/rag-eval.md. */
 object EvalTable {
     fun render(summaries: List<VariantSummary>, cases: List<CaseResult>): String = buildString {
-        appendLine("| variant | n | routing | retrieval hit | relevancy | grounded | correct | avg ms | p95 ms | decision ms | tokens in/out | \$ per 1k answers | errors |")
-        appendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        appendLine("| model | variant | n | routing | retrieval hit | relevancy | grounded | correct | avg ms | p95 ms | decision ms | tokens in/out | \$ per 1k answers | errors |")
+        appendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         summaries.forEach { s ->
             appendLine(
-                "| ${s.variant.wire} | ${s.cases} | ${pct(s.routing)} | ${pct(s.retrievalHit)} | ${pct(s.relevancy)} | ${pct(s.groundedness)} | " +
+                "| ${s.model} | ${s.variant.wire} | ${s.cases} | ${pct(s.routing)} | ${pct(s.retrievalHit)} | ${pct(s.relevancy)} | ${pct(s.groundedness)} | " +
                     "${pct(s.correctness)} | ${s.avgLatencyMs} | ${s.p95LatencyMs} | ${s.avgDecisionMs} | " +
-                    "${s.avgPromptTokens ?: "-"}/${s.avgCompletionTokens ?: "-"} | ${s.estAnswerCostUsdPer1k?.let { "%.3f".format(it) } ?: "-"} | ${s.errors} |"
+                    "${s.avgPromptTokens ?: "-"}/${s.avgCompletionTokens ?: "-"} | ${usd(s.estAnswerCostUsdPer1k)} | ${s.errors} |"
             )
         }
         appendLine()
-        appendLine("| case | variant | type | hit | rel | grd | cor | ms | sources |")
-        appendLine("|---|---|---|---|---|---|---|---|---|")
+        appendLine("| case | model | variant | type | hit | rel | grd | cor | ms | sources |")
+        appendLine("|---|---|---|---|---|---|---|---|---|---|")
         cases.forEach { c ->
             appendLine(
-                "| ${c.id} | ${c.variant.wire} | ${c.answerType?.wire ?: "error"} | ${mark(c.retrievalHit)} | ${mark(c.relevant)} | " +
+                "| ${c.id} | ${c.model} | ${c.variant.wire} | ${c.answerType?.wire ?: "error"} | ${mark(c.retrievalHit)} | ${mark(c.relevant)} | " +
                     "${mark(c.grounded)} | ${mark(c.correct)} | ${c.latencyMs} | ${c.sources.joinToString(", ")} |"
             )
         }
     }
 
-    private fun pct(v: Double?) = v?.let { "%.0f%%".format(it * 100) } ?: "-"
+    internal fun pct(v: Double?) = v?.let { "%.0f%%".format(it * 100) } ?: "-"
+    internal fun usd(v: Double?) = v?.let { "%.3f".format(it) } ?: "unknown"
     private fun mark(v: Boolean?) = when (v) { true -> "Y"; false -> "N"; null -> "-" }
+}
+
+/** F5: the model comparison table (build/reports/rag-eval/model-comparison.md, README F5 section). */
+object ModelComparisonTable {
+    fun render(summaries: List<VariantSummary>): String = buildString {
+        appendLine("| model | variant | n | routing | relevancy | grounded | correct | correct (hard) | p50 ms | p95 ms | avg tokens in/out | \$ per 1k questions | errors |")
+        appendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        summaries.forEach { s ->
+            appendLine(
+                "| ${s.model} | ${s.variant.wire} | ${s.cases} | ${EvalTable.pct(s.routing)} | ${EvalTable.pct(s.relevancy)} | " +
+                    "${EvalTable.pct(s.groundedness)} | ${EvalTable.pct(s.correctness)} | ${EvalTable.pct(s.hardCorrectness)} | " +
+                    "${s.p50LatencyMs} | ${s.p95LatencyMs} | ${s.avgPromptTokens ?: "-"}/${s.avgCompletionTokens ?: "-"} | " +
+                    "${EvalTable.usd(s.estAnswerCostUsdPer1k)} | ${s.errors} |"
+            )
+        }
+    }
 }

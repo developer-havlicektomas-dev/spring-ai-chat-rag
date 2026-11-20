@@ -272,3 +272,47 @@ Takeaway: on 4 tiny docs, quality is at the ceiling either way. The decision ste
 remove off-topic chunks (24% fewer prompt tokens, cleaner sources), but they don't improve answers here. To make the
 comparison mean something, add harder questions and more (and overlapping) docs. Sanity check: changing one reference to
 a wrong fact flips `correct` to N, so the judge isn't just saying yes to everything.
+
+## F5 Model comparison (Spring AI 2.1.0 GA)
+
+Spring AI 2.1.0 GA hit Maven Central on 2026-11-19; this branch now uses it (RC2 -> GA needed no code changes).
+
+The answer call can switch model per request (`OpenAiChatOptions` override merged by ChatClient); query rewrite,
+decision steps and the **judge (gpt-4.1, fixed)** keep their models, so quality scores are comparable. Allowed models
+and their prices live in `rag.eval.models` (application.yml, OpenAI pricing page, 2026-11-20); anything else is a 400.
+Reasoning models (gpt-5*, o*) never get a temperature (they reject it). Cost = real prompt + completion tokens of each
+answer call x list price (unknown price -> "unknown", never a guess). Only OpenAI models: it's the only key on the box.
+
+The golden set grew to 28 cases: 10 new `difficulty: hard` ones (sealed subclass in another file / module trap,
+launch vs async comparison, runBlocking in a handler, destructuring a body property, constructor rules, smart casts,
+`?.let ?:` semantics, near-miss out-of-scope SupervisorJob / Flow timeout).
+
+```bash
+SPRING_DOCKER_COMPOSE_ENABLED=false ./gradlew evalRag -PevalModels=gpt-4o-mini,gpt-4.1-mini,gpt-5.4-mini,gpt-5.6-luna
+./gradlew evalRag -PevalModels=gpt-4o-mini,gpt-5.4-nano -PevalDifficulty=hard   # only the hard cases
+# -> build/reports/rag-eval/model-comparison.md (+ per-case rows in rag-eval.md)
+curl -s -X POST localhost:8080/kotlin/evals/run -H 'Content-Type: application/json' \
+  -d '{"models":["gpt-4o-mini","gpt-5.4-nano"],"difficulty":"hard","limit":3}' | jq -r .comparison
+curl -s -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' \
+  -d '{"question":"Can a sealed subclass live in another file?","model":"gpt-4.1-mini"}' | jq '{model, usage, answer}'
+# token usage per model via Micrometer (Spring AI observations)
+curl -s 'localhost:8080/actuator/metrics/gen_ai.client.token.usage?tag=gen_ai.request.model:gpt-4.1-mini&tag=gen_ai.token.type:output'
+```
+
+Run on 2026-11-20 (28 cases, baseline variant, judge gpt-4.1, Qdrant + 4 docs):
+
+| model | variant | n | routing | relevancy | grounded | correct | correct (hard) | p50 ms | p95 ms | avg tokens in/out | $ per 1k questions | errors |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpt-4o-mini | baseline | 28 | 96% | 96% | 91% | 83% | 63% | 1945 | 3999 | 299/108 | 0.110 | 0 |
+| gpt-4.1-mini | baseline | 28 | 96% | 96% | 91% | 100% | 100% | 1524 | 1983 | 299/102 | 0.284 | 0 |
+| gpt-5.4-mini | baseline | 28 | 96% | 96% | 96% | 96% | 100% | 1261 | 1945 | 298/68 | 0.531 | 0 |
+| gpt-5.6-luna | baseline | 28 | 96% | 96% | 91% | 96% | 100% | 2530 | 4795 | 298/178 | 0.273 | 0 |
+Takeaways:
+- The hard cases separate the models: gpt-4o-mini drops to 63% on them (it falls for "sealed subclasses must be in the
+  same file" - old Kotlin knowledge beats the retrieved chunk), the three newer models get 100%.
+- gpt-5.4-mini is the fastest and most grounded but ~5x gpt-4o-mini's cost; gpt-4.1-mini is the best value (100%
+  correct, ~2.6x cost); gpt-5.6-luna is cheap per token but writes longer answers (178 output tokens) and is the slowest.
+- routing 96% for every model is one case (`hard-dc-destructure-body`): the sufficiency gate (decision model, not the
+  answer model) judged the context insufficient and it fell back. That's a gate/doc issue, not a model one.
+- Costs above are the answer call only. The same run's Micrometer totals show the judge (gpt-4.1, ~62k input tokens)
+  and the decision gate (~33k tokens) are bigger than any single answer model, so judging is the real eval cost.

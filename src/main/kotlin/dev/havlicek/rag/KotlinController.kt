@@ -22,8 +22,10 @@ data class AskRequest(
     // F3: per-request override of rag.rerank.enabled / rag.decision-filter.enabled
     val rerank: Boolean? = null,
     val decisionFilter: Boolean? = null,
+    // F5: answer-model override, one of rag.eval.models (validated in ChatService -> 400 otherwise)
+    @Size(max = 64) val model: String? = null,
 ) {
-    fun toOptions() = AskOptions(RetrievalFilter.of(source, sources, topics), conversationId, rerank, decisionFilter)
+    fun toOptions() = AskOptions(RetrievalFilter.of(source, sources, topics), conversationId, rerank, decisionFilter, model)
 }
 
 data class OpsRequest(
@@ -40,9 +42,14 @@ data class ConfirmRequest(
     @Size(max = 500) val reason: String? = null,
 )
 
-/** F4: which variants to compare (baseline, rerank, filter, full) and optionally only the first [limit] or some [ids]. */
+/**
+ * F4: which variants to compare (baseline, rerank, filter, full) and optionally only the first [limit] or some [ids].
+ * F5: [models] = answer models to compare (each must be in rag.eval.models); [difficulty] = only "hard" cases etc.
+ */
 data class EvalRequest(
     @Size(max = 4) val variants: List<String>? = null,
+    @Size(max = 4) val models: List<String>? = null,
+    @Pattern(regexp = "[a-z]{1,16}") val difficulty: String? = null,
     @field:jakarta.validation.constraints.Min(1) val limit: Int? = null,
     val ids: Set<String>? = null,
 )
@@ -110,10 +117,12 @@ class KotlinController(
     /** F4: run the golden set (slow: several LLM calls per question). Docs must be ingested. */
     @PostMapping("/evals/run")
     fun runEvals(@Valid @RequestBody(required = false) request: EvalRequest?): EvalReport =
-        ragEvalRunner.run(EvalVariant.parse(request?.variants), request?.limit, request?.ids)
+        ragEvalRunner.run(
+            EvalVariant.parse(request?.variants), request?.limit, request?.ids, request?.models.orEmpty(), request?.difficulty,
+        )
 
-    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant. */
-    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class)
+    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant; F5: unknown model. */
+    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class, InvalidModelException::class)
     fun badRequest(e: RuntimeException): ResponseEntity<Map<String, String?>> =
         ResponseEntity.badRequest().body(mapOf("error" to e.message))
 
