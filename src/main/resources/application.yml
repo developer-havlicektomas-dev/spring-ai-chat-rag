@@ -23,8 +23,53 @@ spring:
 rag:
   top-k: ${RAG_TOP_K:4}
   similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.3}
+  session-ttl-minutes: ${RAG_SESSION_TTL_MINUTES:60}
+  max-turns: ${RAG_MAX_TURNS:10}
+  keep-turns: ${RAG_KEEP_TURNS:6}
+  # F3: chunking (re-run POST /kotlin/docs/ingest after changing; the ingest endpoint also takes ?chunkSize=&chunkOverlap=)
+  chunk-size: ${RAG_CHUNK_SIZE:800}
+  chunk-overlap: ${RAG_CHUNK_OVERLAP:0}
+  # F3: Spring AI 2.1 DecisionModel post-processors (OpenAI Decisions API); per request: "rerank" / "decisionFilter"
+  rerank:
+    enabled: ${RAG_RERANK_ENABLED:false}
+    top-n: ${RAG_RERANK_TOP_N:3}
+    min-score: ${RAG_RERANK_MIN_SCORE:0.1}
+  decision-filter:
+    enabled: ${RAG_DECISION_FILTER_ENABLED:false}
+    fail-closed: ${RAG_DECISION_FILTER_FAIL_CLOSED:false}
+  # F3: "is the retrieved context sufficient?" gate -> labeled general-knowledge fallback instead of a refusal
+  sufficiency:
+    enabled: ${RAG_SUFFICIENCY_ENABLED:true}
+    min-probability: ${RAG_SUFFICIENCY_MIN_PROBABILITY:0.5}
+  decision-timeout-seconds: ${RAG_DECISION_TIMEOUT_SECONDS:20}
+  # F4: golden-set evals (POST /kotlin/evals/run or ./gradlew evalRag)
+  eval:
+    # F5: one fixed judge for every compared model (stronger than the answer models; non-reasoning so temperature 0 works)
+    judge-model: ${EVAL_JUDGE_MODEL:gpt-4.1}
+    # F5: allow-list of answer models (POST /kotlin/chat/ask "model", POST /kotlin/evals/run "models", -PevalModels)
+    # with list prices in USD per 1M tokens, standard tier, short context, no cached-input discount.
+    # Source: https://platform.openai.com/docs/pricing (fetched 2026-11-20). Leave a price out if you can't verify it:
+    # the cost column then says "unknown" instead of guessing. reasoning-effort only applies to gpt-5* / o* models.
+    models:
+      - { name: gpt-4o-mini,  input-per-1m: 0.15, output-per-1m: 0.60 }
+      - { name: gpt-4.1-mini, input-per-1m: 0.40, output-per-1m: 1.60 }
+      - { name: gpt-4.1,      input-per-1m: 2.00, output-per-1m: 8.00 }
+      - { name: gpt-5-nano,   input-per-1m: 0.05, output-per-1m: 0.40 }
+      - { name: gpt-5-mini,   input-per-1m: 0.25, output-per-1m: 2.00 }
+      - { name: gpt-5.4-nano, input-per-1m: 0.20, output-per-1m: 1.25 }
+      - { name: gpt-5.4-mini, input-per-1m: 0.75, output-per-1m: 4.50 }
+      - { name: gpt-5.6-luna, input-per-1m: 0.20, output-per-1m: 1.20 }
+
+# F5: /actuator/metrics/gen_ai.client.token.usage (Spring AI observations -> Micrometer)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
 
 logging:
   level:
     # set to DEBUG to see the full RAG prompt incl. retrieved chunks
     org.springframework.ai.chat.client.advisor: ${ADVISOR_LOG_LEVEL:INFO}
+    org.springframework.ai.rag: ${ADVISOR_LOG_LEVEL:INFO}
+    org.springframework.ai.openai.OpenAiDecisionModel: ${DECISION_LOG_LEVEL:INFO}
