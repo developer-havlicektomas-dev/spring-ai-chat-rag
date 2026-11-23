@@ -23,6 +23,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
     @MockitoBean lateinit var chatService: ChatService
     @MockitoBean lateinit var koogBridgeService: KoogBridgeService
     @MockitoBean lateinit var koogAgentService: KoogAgentService
+    @MockitoBean lateinit var koogStudyService: KoogStudyService
     @MockitoBean lateinit var opsAgentService: OpsAgentService
     @MockitoBean lateinit var ragEvalRunner: RagEvalRunner
 
@@ -238,5 +239,26 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             contentType = MediaType.APPLICATION_JSON
             content = """{"question":""}"""
         }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `agent study rejects blank and too long questions`() {
+        mvc.post("/kotlin/agent/study") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"   "}"""
+        }.andExpect { status { isBadRequest() } }
+        mvc.post("/kotlin/agent/study") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"question":"${"x".repeat(2001)}"}"""
+        }.andExpect { status { isBadRequest() } }
+    }
+
+    @Test
+    fun `agent study graph is served as mermaid text`() {
+        given(koogStudyService.mermaid).willReturn("stateDiagram\n    [*] --> research")
+        mvc.get("/kotlin/agent/study/graph").andExpect {
+            status { isOk() }
+            content { string(org.hamcrest.Matchers.containsString("research")) }
+        }
     }
 }

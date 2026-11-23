@@ -316,3 +316,41 @@ Takeaways:
   answer model) judged the context insufficient and it fell back. That's a gate/doc issue, not a model one.
 - Costs above are the answer call only. The same run's Micrometer totals show the judge (gpt-4.1, ~62k input tokens)
   and the decision gate (~33k tokens) are bigger than any single answer model, so judging is the real eval cost.
+
+## Koog strategies (F6)
+
+`/kotlin/agent/ask` (Day 9) uses Koog's default single-run strategy: LLM <-> tools until a text answer. F6 builds a
+**custom graph strategy** (`KoogStudyStrategy.kt`) that turns a question into a typed study pack - the same shape the
+AI Study Guide app needs (answer, key points, sources, quiz):
+
+```
+start -> research --toolCalls--> runTools -> collectSources -> readResults --toolCalls--> runTools (loop)
+         research / readResults --text--> keepDraft -> toStudyPack (structured) -> unwrap -> finish
+```
+
+- `research` = `nodeLLMRequest` (tools offered; the system prompt asks for 1-3 `searchKotlinDocs` calls),
+  `runTools` = `nodeExecuteTools` (several calls from one LLM turn run together), `readResults` = `nodeLLMSendToolResults`.
+- `collectSources` / `keepDraft` / `unwrap` are custom `node<I, O>`s; per-run state (draft, doc sources the tool
+  really returned) lives in the agent `storage`, so one strategy instance serves all requests.
+- `toStudyPack` = `nodeLLMRequestStructured<StudyPack>`: Koog builds a JSON schema from the `@Serializable` +
+  `@LLMDescription` data classes, sends one example, and a `StructureFixingParser` (2 retries) repairs broken JSON.
+  If that still fails, `unwrap` returns the plain draft with `structured=false` instead of a 500.
+- The server never trusts the model's `sources`: only files the tool returned survive, and `grounded` is true only if
+  the tool found docs **and** the model says they cover the question (labeled fallback otherwise).
+- `GET /kotlin/agent/study/graph` prints the graph as a Mermaid diagram (`asMermaidDiagram()`, paste into mermaid.live).
+
+```bash
+curl -s -X POST localhost:8080/kotlin/agent/study -H 'Content-Type: application/json' \
+  -d '{"question":"Where can the direct subclasses of a sealed class be declared?"}' | jq '{structured, grounded, nodes, toolCalls, pack}'
+curl -s -X POST localhost:8080/kotlin/agent/study -H 'Content-Type: application/json' \
+  -d '{"question":"When should I use a data class versus a sealed class?"}' | jq '{nodes, tools: [.toolCalls[].args], quiz: .pack.quiz}'
+curl -s -X POST localhost:8080/kotlin/agent/study -H 'Content-Type: application/json' \
+  -d '{"question":"What is the capital of France?"}' | jq '{grounded, nodes, answer: .pack.answer}'
+curl -s localhost:8080/kotlin/agent/study/graph
+```
+
+Run on 2026-11-23 (gpt-4o-mini via the Spring AI bridge): sealed question -> 1 search, all 7 nodes, structured OK,
+3 quiz items, ~9.8 s; data vs sealed -> 2 searches in one turn, ~11.8 s; capital of France -> no tool call,
+`research -> keepDraft -> toStudyPack -> unwrap`, `grounded=false`, ~2.8 s. The graph costs 3 LLM calls on the
+grounded path (research, read results, structure) vs 2 for `/agent/ask`. `KoogStudyStrategyTest` runs the whole
+graph offline with a scripted `PromptExecutor` (happy path + structured-output fallback).

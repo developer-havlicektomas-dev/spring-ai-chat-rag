@@ -63,6 +63,7 @@ class KotlinController(
     private val chatService: ChatService,
     private val koogBridgeService: KoogBridgeService,
     private val koogAgentService: KoogAgentService,
+    private val koogStudyService: KoogStudyService,
     private val opsAgentService: OpsAgentService,
     private val ragEvalRunner: RagEvalRunner,
 ) {
@@ -104,6 +105,15 @@ class KotlinController(
     @PostMapping("/agent/ask")
     suspend fun agentAsk(@Valid @RequestBody request: KoogRequest): AgentAnswer =
         koogAgentService.ask(request.question.trim())
+
+    /** F6: custom Koog graph strategy -> typed StudyPack (answer, key points, sources, quiz). */
+    @PostMapping("/agent/study")
+    suspend fun agentStudy(@Valid @RequestBody request: KoogRequest): StudyAnswer =
+        koogStudyService.study(request.question.trim())
+
+    /** F6: the study strategy graph as a Mermaid state diagram (paste into mermaid.live). */
+    @GetMapping("/agent/study/graph", produces = [MediaType.TEXT_PLAIN_VALUE])
+    fun agentStudyGraph(): String = koogStudyService.mermaid
 
     /** F2: ops assistant with tools; destructive tools pause for confirmation (status "awaiting_confirmation"). */
     @PostMapping("/ops/ask")
