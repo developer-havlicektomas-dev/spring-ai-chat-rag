@@ -42,6 +42,9 @@ rag:
     enabled: ${RAG_SUFFICIENCY_ENABLED:true}
     min-probability: ${RAG_SUFFICIENCY_MIN_PROBABILITY:0.5}
   decision-timeout-seconds: ${RAG_DECISION_TIMEOUT_SECONDS:20}
+  # F7: allow-list for the research agent's fetchWebPage tool (https only, host or subdomain)
+  web:
+    allowed-hosts: ${RAG_WEB_ALLOWED_HOSTS:kotlinlang.org,docs.spring.io,docs.koog.ai,api.koog.ai}
   # F4: golden-set evals (POST /kotlin/evals/run or ./gradlew evalRag)
   eval:
     # F5: one fixed judge for every compared model (stronger than the answer models; non-reasoning so temperature 0 works)
@@ -73,3 +76,5 @@ logging:
     org.springframework.ai.chat.client.advisor: ${ADVISOR_LOG_LEVEL:INFO}
     org.springframework.ai.rag: ${ADVISOR_LOG_LEVEL:INFO}
     org.springframework.ai.openai.OpenAiDecisionModel: ${DECISION_LOG_LEVEL:INFO}
+    # F7: Koog Tracing feature output (every agent event); set KOOG_TRACE_LOG_LEVEL=DEBUG to see it
+    koog.trace: ${KOOG_TRACE_LOG_LEVEL:INFO}

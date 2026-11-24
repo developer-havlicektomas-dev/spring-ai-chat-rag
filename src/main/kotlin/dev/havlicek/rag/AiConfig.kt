@@ -79,6 +79,10 @@ class AiConfig {
             )
             .build()
 
+    /** F7: the research agent's web tool may only fetch https pages from these hosts (and their subdomains). */
+    @Bean
+    fun webPageFetcher(@Value("\${rag.web.allowed-hosts}") allowedHosts: List<String>) = WebPageFetcher(allowedHosts)
+
     /** F5: allow-listed answer models + prices (rag.eval.models). */
     @Bean
     fun modelCatalog(props: RagProperties) = ModelCatalog(props.eval.models)

@@ -354,3 +354,67 @@ Run on 2026-11-23 (gpt-4o-mini via the Spring AI bridge): sealed question -> 1 s
 `research -> keepDraft -> toStudyPack -> unwrap`, `grounded=false`, ~2.8 s. The graph costs 3 LLM calls on the
 grounded path (research, read results, structure) vs 2 for `/agent/ask`. `KoogStudyStrategyTest` runs the whole
 graph offline with a scripted `PromptExecutor` (happy path + structured-output fallback).
+
+## Koog multiple tools + memory (F7)
+
+`POST /kotlin/agent/research` is a Koog "research assistant": the default single-run strategy (LLM <-> tools loop)
+with three tools, conversation memory and a structured trace. `POST /kotlin/chat/tools` wires the **same** tools into
+plain Spring AI tool calling, and `POST /kotlin/agent/compare` runs both side by side.
+
+**Tools** (`ResearchTools.kt`, one class annotated for both frameworks: Koog `@Tool`/`@LLMDescription` via `ToolSet`,
+Spring AI `@Tool`/`@ToolParam` via `ToolCallbacks.from`):
+- `searchKotlinDocs(query)` - the Qdrant vector search (top 4) with `[source: file.md]` labels.
+- `calculate(expression)` - `Calculator.kt`, a ~100-line recursive-descent parser (`+ - * / % ^`, parentheses,
+  `sqrt/abs/round`, `pi/e`). No script engine, nothing can be executed; errors go back to the model as `Error: ...`.
+- `fetchWebPage(url)` - `WebPageFetcher.kt`, real HTTP but locked down: https only, host on `rag.web.allowed-hosts`
+  (default `kotlinlang.org, docs.spring.io, docs.koog.ai, api.koog.ai`, subdomains ok), redirects re-checked (max 3),
+  5 s connect / 10 s timeout, 512 KB read cap, HTML -> text (scripts/nav dropped, `<main>` preferred), 4000 chars max.
+  So no SSRF to localhost/Qdrant/cloud metadata, no API key needed.
+
+**Memory**: Koog's `ChatMemory` feature (`agents-features-memory`) with our `AgentConversationMemory` as the
+`ChatHistoryProvider`; `agent.run(question, conversationId)` loads the conversation before the run and stores it after.
+A custom preprocessor keeps *system prompt + last 20 dialogue messages* and drops tool calls/results (ChatMemory
+replaces the prompt with the loaded history, so the system prompt must stay in it; and a window must never split a tool
+call from its result). In memory for now - F8 swaps in a Postgres `ChatHistoryProvider`.
+`GET|DELETE /kotlin/agent/research/{id}/memory` shows / forgets a conversation.
+
+**Tracing / observability**:
+- `EventHandler` callbacks feed `AgentTraceRecorder`: the response has `trace` (llm / tool / node events with offset +
+  duration, tokens per LLM call), `toolCalls` (args, latency, ok, result preview), `llmCalls`, `inputTokens`, `outputTokens`.
+- Koog's `Tracing` feature writes every agent event to the `koog.trace` logger (`KOOG_TRACE_LOG_LEVEL=DEBUG` to see it).
+- Micrometer: `agent.runs`, `agent.llm.calls`, `agent.tool.calls{engine,tool,outcome}`, `agent.llm.tokens{engine,type}`
+  -> `curl localhost:8080/actuator/metrics/agent.tool.calls?tag=engine:koog`.
+
+```bash
+curl -s -X POST localhost:8080/kotlin/agent/research -H 'Content-Type: application/json' \
+  -d '{"question":"Where must the direct subclasses of a sealed class be declared?"}' | jq '{answer, toolCalls, latencyMs}'
+curl -s -X POST localhost:8080/kotlin/agent/research -H 'Content-Type: application/json' \
+  -d '{"question":"What is (1250 * 0.18 + 37) / 4 ?"}' | jq '{answer, toolCalls}'
+curl -s -X POST localhost:8080/kotlin/agent/research -H 'Content-Type: application/json' \
+  -d '{"question":"Look up what the Koog ChatMemory feature does on https://docs.koog.ai/features/chat-memory/ and what a Kotlin data class generates (local docs). Also compute 24 * 365."}' | jq '{answer, tools: [.toolCalls[] | {tool, latencyMs}], trace}'
+# memory: two turns, same conversationId
+curl -s -X POST localhost:8080/kotlin/agent/research -H 'Content-Type: application/json' \
+  -d '{"question":"Remember this: my project uses Kotlin 2.3 and our build budget is 40 minutes per day.","conversationId":"demo-1"}' | jq .answer
+curl -s -X POST localhost:8080/kotlin/agent/research -H 'Content-Type: application/json' \
+  -d '{"question":"Which Kotlin version does my project use, and how many hours of build time is my budget per 30-day month?","conversationId":"demo-1"}' | jq '{answer, toolCalls, memoryMessages}'
+curl -s localhost:8080/kotlin/agent/research/demo-1/memory | jq
+# Koog agent vs Spring AI tool calling, same tools + prompt + model
+curl -s -X POST localhost:8080/kotlin/agent/compare -H 'Content-Type: application/json' \
+  -d '{"question":"What does the Kotlin compiler generate for a data class (local docs)? Also compute 17.5% of 2400."}' \
+  | jq '{koog: (.koog | {latencyMs, llmCalls, inputTokens, outputTokens, tools: [.toolCalls[].tool]}), springAi: (.springAi | {latencyMs, inputTokens, outputTokens, tools: [.toolCalls[].tool]})}'
+```
+
+Run on 2026-11-24 (gpt-4o-mini): sealed question -> 1 search, 2 LLM calls, 3.3 s; calculator -> `65.5`, 1.9 s;
+multi-tool -> fetchWebPage + searchKotlinDocs + calculate requested in ONE LLM turn, 2 LLM calls, 6.0 s; memory turn 2
+answered "Kotlin 2.3" and "20 hours" (calculator 40*30/60) from turn 1, another conversationId did not know it;
+compare -> Koog 2.8 s / 1108+159 tokens vs Spring AI 3.1 s / 1109+161 tokens, same 2 tools.
+
+**Koog agent vs Spring AI tool calling** (same tools, prompt, model):
+
+| | Koog `AIAgent` | Spring AI `ChatClient` + tools |
+|---|---|---|
+| Tool loop | explicit strategy graph (nodes you can replace, F6) | hidden inside `ChatModel` / `ToolCallingManager` |
+| Memory | `ChatMemory` feature + `ChatHistoryProvider` | session advisors / `SessionService` (F1) |
+| Observability | `EventHandler`, `Tracing`, `OpenTelemetry` features, per-node events | Micrometer observations (`spring.ai.tool`, `gen_ai.client.*`); per-call detail needs a `ToolCallback` wrapper |
+| Human approval | custom node | `requiresConfirmation` (F2) |
+| Cost / latency (compare run) | 2 LLM calls, 2.8 s, 1108+159 tokens | same round trips, 3.1 s, 1109+161 tokens |
