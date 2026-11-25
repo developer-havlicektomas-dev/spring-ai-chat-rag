@@ -19,7 +19,11 @@ class DocsService(private val vectorStore: VectorStore, private val props: RagPr
      * F3: chunk size/overlap come from rag.chunk-size / rag.chunk-overlap unless [settings] overrides them (chunk experiment),
      * and every chunk gets `topic` + `chunk_index` metadata for filtering and citations.
      */
-    fun ingest(settings: ChunkSettings = ChunkSettings(props.chunkSize, props.chunkOverlap)): Map<String, Int> {
+    fun ingest(
+        settings: ChunkSettings = ChunkSettings(props.chunkSize, props.chunkOverlap),
+        /** F8: defaults to the active store; the vector store comparison ingests into the other one too */
+        store: VectorStore = vectorStore,
+    ): Map<String, Int> {
         val splitter = TokenTextSplitter.builder()
             .withChunkSize(settings.chunkSize)
             .withChunkOverlap(settings.chunkOverlap)
@@ -35,8 +39,8 @@ class DocsService(private val vectorStore: VectorStore, private val props: RagPr
                 .build()
             val chunks: List<Document> = splitter.apply(MarkdownDocumentReader(resource, config).get())
                 .mapIndexed { i, chunk -> chunk.mutate().metadata(chunk.metadata + ("chunk_index" to i)).build() }
-            vectorStore.delete("source == '$name'")
-            vectorStore.add(chunks)
+            store.delete("source == '$name'")
+            store.add(chunks)
             name to chunks.size
         }
     }
@@ -50,11 +54,15 @@ class DocsService(private val vectorStore: VectorStore, private val props: RagPr
         PathMatchingResourcePatternResolver().getResources("classpath:docs/*.md").mapNotNull { it.filename }.sorted()
 
     /** F2: chunks currently in Qdrant for one source (fine for a small corpus; Qdrant's count API would scale better). */
-    fun countChunks(source: String): Int =
-        vectorStore.similaritySearch(
+    fun countChunks(source: String, store: VectorStore = vectorStore): Int =
+        store.similaritySearch(
             SearchRequest.builder().query("Kotlin").topK(1000).similarityThresholdAll()
                 .filterExpression("source == '${requireSafeSource(source)}'").build()
         ).size
+
+    /** F8: all chunks in a store (one search, so one embedding call; fine for a small corpus). */
+    fun countAll(store: VectorStore = vectorStore): Int =
+        store.similaritySearch(SearchRequest.builder().query("Kotlin").topK(10_000).similarityThresholdAll().build()).size
 
     /** F2: removes every chunk of one source from Qdrant. Destructive - only reachable through a confirmed tool call. */
     fun deleteSource(source: String): Int {

@@ -1,10 +1,11 @@
 # spring-ai-kotlin-rag
 
-A small learning project: RAG over Kotlin docs with Spring Boot 4.1.2, Spring AI 2.0.2, Kotlin 2.3.21, OpenAI and Qdrant.
+A small learning project: RAG over Kotlin docs with Spring Boot 4.1.2, Spring AI 2.1.0, Kotlin 2.3.21, Koog 1.3.0, OpenAI, Qdrant and (F8) Postgres + pgvector.
 
 ## Prerequisites
 - JDK 21
 - A running Docker engine (e.g. `colima start`). `bootRun` starts Qdrant from `compose.yaml` via Spring Boot's Docker Compose support (REST/dashboard on 6333, gRPC on 6334; Spring AI uses gRPC) and stops it when the app exits. Data is kept in the `qdrant_storage` volume. Tests skip Docker Compose.
+  F8: `compose.yaml` also starts Postgres 17 + pgvector (`postgres_data` volume); the app needs it by default (sessions, users, agent memory). Without Postgres: `SPRING_PROFILES_ACTIVE=memory`, see [Postgres + pgvector (F8)](#postgres--pgvector-f8).
 - `export OPENAI_API_KEY=sk-...`. You need it even to start the app, because creating the Qdrant collection makes one embedding call to read the vector size.
 
 Optional overrides: `CHAT_MODEL` (default `gpt-4o-mini`), `QDRANT_HOST`, `QDRANT_GRPC_PORT`.
@@ -418,3 +419,104 @@ compare -> Koog 2.8 s / 1108+159 tokens vs Spring AI 3.1 s / 1109+161 tokens, sa
 | Observability | `EventHandler`, `Tracing`, `OpenTelemetry` features, per-node events | Micrometer observations (`spring.ai.tool`, `gen_ai.client.*`); per-call detail needs a `ToolCallback` wrapper |
 | Human approval | custom node | `requiresConfirmation` (F2) |
 | Cost / latency (compare run) | 2 LLM calls, 2.8 s, 1108+159 tokens | same round trips, 3.1 s, 1109+161 tokens |
+
+## Postgres + pgvector (F8)
+
+Postgres becomes the app's system of record (prep for the Study Guide SaaS backend) and a second vector store:
+
+| What | Where | Code |
+|---|---|---|
+| Chat sessions + messages (`conversationId`) | `AI_SESSION`, `AI_SESSION_EVENT`, `AI_SESSION_INDEX` | Spring AI's official `JdbcSessionRepository` (`spring-ai-starter-model-session-jdbc`), plugged into the F1 `SessionService` |
+| Users | `app_user` (+ view `chat_session_overview`) | `JdbcUserDirectory`, `UserSessions` |
+| Koog research-agent memory (F7) | `agent_memory` (JSONB, one row per conversation) | `JdbcAgentMemoryStore` behind `AgentConversationMemory` |
+| Kotlin docs chunks (optional) | `kotlin_docs` (`vector(1536)`, HNSW, cosine) | Spring AI `PgVectorStore` auto-configuration |
+
+Schema is owned by Flyway (`src/main/resources/db/migration`): `V1` is Spring AI 2.1.0's `schema-postgresql.sql` copied
+verbatim (Spring AI's own initializer is off: `spring.ai.session.repository.jdbc.initialize-schema=never`), `V2` app_user,
+`V3` agent_memory. The pgvector table is created by `PgVectorStore` itself (`initialize-schema: true`).
+
+**Switching the vector store**: `RAG_VECTOR_STORE=qdrant` (default) or `pgvector`. It feeds Spring AI's own switch
+`spring.ai.vectorstore.type`, so exactly one store auto-configuration creates the `VectorStore` bean, and RAG,
+`/kotlin/docs/*`, the agents' search tool and the evals use it without code changes. `VectorStoreRegistry` builds the
+*other* store on demand with the same `spring.ai.vectorstore.*` settings (for ingest + comparison only).
+
+**Users**: optional `X-User-Id` header (1-64 of `[A-Za-z0-9._@-]`, default `anonymous` = `RAG_DEFAULT_USER`). The first
+request creates the `app_user` row; a new conversation is created with Spring AI's standard `principalName` session
+attribute = the user (indexed in `AI_SESSION_INDEX`). Another user's `conversationId` behaves like an unknown one (404).
+Eval runs use the user `rag-evals`. Sessions now live 7 days (`RAG_SESSION_TTL_MINUTES=10080`); expired ones are deleted
+hourly (`ExpiredSessionCleaner`). Not real auth yet: in the SaaS backend the header becomes the JWT subject.
+
+### Run on the Mac (Docker Compose)
+```bash
+./gradlew bootRun                                   # compose.yaml starts qdrant + postgres (pgvector/pgvector:0.8.7-pg17)
+RAG_VECTOR_STORE=pgvector ./gradlew bootRun         # same, RAG on pgvector
+psql postgresql://rag:rag@localhost:5432/rag -c 'select * from chat_session_overview'
+```
+Spring Boot's docker-compose support wires the container into `spring.datasource.*` (label
+`org.springframework.boot.service-connection: postgres`).
+
+### Run manually (no Docker, e.g. the dev box)
+```bash
+/workspace/tools/postgres/start-postgres.sh   # Postgres 17 + pgvector 0.8.0, data in /workspace/tools/postgres/data, port 5432, db/user rag/rag
+/workspace/tools/qdrant/start-qdrant.sh
+./gradlew bootJar
+SPRING_DOCKER_COMPOSE_ENABLED=false java -jar build/libs/spring-ai-kotlin-rag-0.0.1-SNAPSHOT.jar
+SPRING_DOCKER_COMPOSE_ENABLED=false RAG_VECTOR_STORE=pgvector java -jar build/libs/spring-ai-kotlin-rag-0.0.1-SNAPSHOT.jar
+# other database: POSTGRES_URL=jdbc:postgresql://host:5432/db POSTGRES_USER=... POSTGRES_PASSWORD=...
+# no Postgres at all (F7 behaviour, in-memory sessions, Qdrant only):
+SPRING_PROFILES_ACTIVE=memory SPRING_DOCKER_COMPOSE_ENABLED=false java -jar build/libs/spring-ai-kotlin-rag-0.0.1-SNAPSHOT.jar
+```
+On your own Postgres: `CREATE EXTENSION vector, hstore, "uuid-ossp"` as a superuser first (PgVectorStore runs
+`CREATE EXTENSION IF NOT EXISTS` for them, which a normal user may not be allowed to do).
+
+### Try it
+```bash
+# which store is active, chunks per store
+curl -s localhost:8080/kotlin/vectorstores | jq
+# ingest the docs into the inactive store too, then compare (default queries = the 28 golden-set questions)
+curl -s -X POST localhost:8080/kotlin/vectorstores/pgvector/ingest | jq
+curl -s -X POST localhost:8080/kotlin/vectorstores/compare -H 'Content-Type: application/json' -d '{"topK":4,"repeats":5}' \
+  | jq '{activeStore, searchLatency, embeddingLatency, meanOverlap, sameTop1, sameOrder, maxScoreDelta, chunks, differences: [.differences[].query]}'
+curl -s -X POST localhost:8080/kotlin/vectorstores/compare -H 'Content-Type: application/json' \
+  -d '{"queries":["What does launch return?","Can a sealed class be a data class?"],"topK":3,"repeats":20}' | jq '.perQuery'
+
+# a session owned by a user ...
+curl -s -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' -H 'X-User-Id: tomas' \
+  -d '{"question":"Remember: my project is called StudyBuddy. How do I restrict which classes can extend a base class?"}' | jq '{conversationId, answerType, answer}'
+curl -s localhost:8080/kotlin/chat/sessions -H 'X-User-Id: tomas' | jq
+# ... restart the app (even with the other RAG_VECTOR_STORE), then continue it:
+curl -s -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' -H 'X-User-Id: tomas' \
+  -d '{"question":"What is my project called?","conversationId":"<id from above>"}' | jq .answer
+curl -s localhost:8080/kotlin/chat/sessions/<id> -H 'X-User-Id: tomas' | jq   # history
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/kotlin/chat/sessions/<id> -H 'X-User-Id: bob'   # 404
+# Koog research memory also survives restarts now
+curl -s localhost:8080/kotlin/agent/research/demo-1/memory | jq
+```
+
+### Results (box, 2026-11-25; Postgres 17.12 + pgvector 0.8.0 HNSW vs Qdrant 1.20.0 binary, 15 chunks, text-embedding-3-small)
+
+`POST /kotlin/vectorstores/compare` (28 golden questions, top-4, 5 repeats = 140 searches per store, query embedding cached):
+
+| | Qdrant (gRPC) | pgvector (JDBC) |
+|---|---|---|
+| search p50 / p95 (Qdrant active) | 1.77 / 2.34 ms | 1.31 / 1.57 ms |
+| search p50 / p95 (pgvector active) | 1.77 / 2.47 ms | 1.49 / 2.21 ms |
+| embedding call per query (OpenAI) | p50 193 ms / 179 ms | (same call) |
+
+- Top-4 overlap 100% on all 28 queries, same top-1 on 27, identical order on 25; the 3 differences are swaps of
+  near-tied chunks (score gap < 0.02), max score difference for the same chunk 0.0165. Cause: the chunks were embedded
+  in two separate ingest runs and OpenAI embeddings are not bit-identical between calls - not the stores.
+- Store latency is noise next to the ~0.2 s embedding call and ~2 s LLM call; with 15 chunks both indexes are trivially
+  exact. Real differences show up at 100k+ vectors (HNSW params, filtering, memory), not here.
+- Evals (`POST /kotlin/evals/run {"variants":["baseline"],"limit":6}`, gpt-4o-mini, judge gpt-4.1): both stores 6/6
+  retrieval hit, relevancy, groundedness and correctness; p50 2130 ms (pgvector) vs 2064 ms (Qdrant).
+- `/kotlin/chat/ask` "restrict which classes can extend a base class": grounded on sealed-classes.md with both
+  (3.1 s Qdrant incl. first-call warm-up, 2.1 s pgvector). A session created on the Qdrant run continued after a restart on
+  pgvector ("Your project is called StudyBuddy ..."), and the Koog research memory remembered "40 minutes per day" across
+  the restart (calculate 40*30/60 = 20 hours).
+
+**Qdrant vs pgvector, when to pick which**: pgvector = one database for users, sessions, documents and vectors
+(transactions, joins, backups, row-level security per tenant - attractive for the SaaS backend); Qdrant = purpose-built,
+richer filtering/payload indexes, quantization, horizontal scaling, better at large scale. For the Study Guide app,
+starting with pgvector (one Postgres) and keeping the `VectorStore` abstraction to move later is the pragmatic choice.
+

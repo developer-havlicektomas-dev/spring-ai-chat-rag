@@ -7,5 +7,27 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  # F8: Postgres 17 + pgvector: users, chat sessions (Spring AI JDBC session repository), Koog agent memory,
+  # and the optional pgvector store (RAG_VECTOR_STORE=pgvector). Local dev credentials only.
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    labels:
+      # spring-boot-docker-compose: wire this container into spring.datasource.* (JdbcConnectionDetails)
+      org.springframework.boot.service-connection: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   qdrant_storage:
+  postgres_data:

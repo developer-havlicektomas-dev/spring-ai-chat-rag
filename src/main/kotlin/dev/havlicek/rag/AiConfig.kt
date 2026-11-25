@@ -9,7 +9,7 @@ import org.springframework.ai.rag.generation.augmentation.ContextualQueryAugment
 import org.springframework.ai.rag.preretrieval.query.transformation.CompressionQueryTransformer
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever
 import org.springframework.ai.session.DefaultSessionService
-import org.springframework.ai.session.InMemorySessionRepository
+import org.springframework.ai.session.SessionRepository
 import org.springframework.ai.session.SessionService
 import org.springframework.ai.session.advisor.SessionAdvisors
 import org.springframework.ai.session.compaction.TurnCountTrigger
@@ -28,12 +28,13 @@ class AiConfig {
 
     /**
      * F1: Spring AI 2.1 SessionService (replaces ChatMemory + ChatMemoryRepository).
-     * In-memory for now; swap the repository for spring-ai-session-jdbc to persist in Postgres (F8).
+     * F8: the repository is whatever [PersistenceConfig] provides: the auto-configured JdbcSessionRepository
+     * (spring-ai-starter-model-session-jdbc, Postgres) by default, InMemorySessionRepository with rag.persistence=memory.
      */
     @Bean
-    fun sessionService(props: RagProperties): SessionService =
+    fun sessionService(sessionRepository: SessionRepository, props: RagProperties): SessionService =
         DefaultSessionService.builder()
-            .sessionRepository(InMemorySessionRepository.builder().build())
+            .sessionRepository(sessionRepository)
             .defaultTimeToLive(Duration.ofMinutes(props.sessionTtlMinutes))
             .build()
 

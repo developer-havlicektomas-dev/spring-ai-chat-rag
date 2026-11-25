@@ -29,6 +29,9 @@ object GoldenSet {
     fun load(json: InputStream): List<EvalCase> = jacksonObjectMapper().readValue<List<EvalCase>>(json)
 }
 
+/** F8: eval runs own their (throwaway) sessions, so they don't show up in a real user's session list. */
+const val EVAL_USER = "rag-evals"
+
 class InvalidEvalVariantException(message: String) : RuntimeException(message)
 
 /** F4: on/off combination of the F3 decision post-processors (the sufficiency gate always follows config). */
@@ -158,7 +161,7 @@ class RagEvalRunner(
         val label = model ?: answerModel
         val started = System.nanoTime()
         val result = try {
-            asker.ask(case.question, AskOptions(rerank = variant.rerank, decisionFilter = variant.decisionFilter, model = model))
+            asker.ask(case.question, AskOptions(rerank = variant.rerank, decisionFilter = variant.decisionFilter, model = model, userId = EVAL_USER))
         } catch (e: Exception) {
             log.warn("eval {} [{} {}] failed: {}", case.id, label, variant.wire, e.message)
             return CaseResult(

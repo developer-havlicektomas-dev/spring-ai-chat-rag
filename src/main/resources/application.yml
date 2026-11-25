@@ -1,6 +1,14 @@
 spring:
   application:
     name: spring-ai-kotlin-rag
+  # F8: Postgres = system of record (users, chat sessions + messages, Koog agent memory) and optional vector store.
+  # Box: /workspace/tools/postgres/start-postgres.sh; Mac: compose.yaml (Spring Boot docker-compose overrides these).
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/rag}
+    username: ${POSTGRES_USER:rag}
+    password: ${POSTGRES_PASSWORD:rag}   # local dev default only
+  flyway:
+    enabled: true   # src/main/resources/db/migration (V1 = Spring AI session schema, V2 = app_user, V3 = agent memory)
   mvc:
     async:
       request-timeout: 2m   # SSE streams run on MVC async; default timeout can cut long answers
@@ -13,17 +21,37 @@ spring:
       embedding:
         options:
           model: text-embedding-3-small
+    # F8: rag.vector-store picks which Spring AI auto-configuration creates the VectorStore bean
+    # (Spring AI's own switch: every store auto-config is @ConditionalOnProperty(spring.ai.vectorstore.type=...))
     vectorstore:
+      type: ${rag.vector-store}
+      pgvector:
+        table-name: kotlin_docs
+        index-type: hnsw
+        distance-type: cosine-distance
+        dimensions: 1536          # text-embedding-3-small
+        initialize-schema: true   # CREATE EXTENSION vector + table + HNSW index if missing
       qdrant:
         host: ${QDRANT_HOST:localhost}
         port: ${QDRANT_GRPC_PORT:6334}
         collection-name: kotlin-docs
         initialize-schema: true
+    # F8: AI_SESSION* tables come from Flyway (V1__spring_ai_session.sql), not from Spring AI's initializer
+    session:
+      repository:
+        jdbc:
+          initialize-schema: never
 
 rag:
+  # F8: qdrant (default) | pgvector - the store behind RAG, /docs/*, the agents' search tool and evals
+  vector-store: ${RAG_VECTOR_STORE:qdrant}
+  # F8: jdbc (default, Postgres) | memory (no database; use the "memory" profile, which also turns off the DataSource)
+  persistence: ${RAG_PERSISTENCE:jdbc}
+  # F8: who calls without an X-User-Id header
+  default-user: ${RAG_DEFAULT_USER:anonymous}
   top-k: ${RAG_TOP_K:4}
   similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.3}
-  session-ttl-minutes: ${RAG_SESSION_TTL_MINUTES:60}
+  session-ttl-minutes: ${RAG_SESSION_TTL_MINUTES:10080}   # F8: 7 days now that sessions are persisted
   max-turns: ${RAG_MAX_TURNS:10}
   keep-turns: ${RAG_KEEP_TURNS:6}
   # F3: chunking (re-run POST /kotlin/docs/ingest after changing; the ingest endpoint also takes ?chunkSize=&chunkOverlap=)

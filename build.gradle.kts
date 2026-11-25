@@ -33,6 +33,13 @@ dependencies {
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("org.springframework.ai:spring-ai-starter-model-openai")
 	implementation("org.springframework.ai:spring-ai-starter-vector-store-qdrant")
+	// F8: second vector store (selected with rag.vector-store=qdrant|pgvector) + Postgres as system of record
+	implementation("org.springframework.ai:spring-ai-starter-vector-store-pgvector")
+	// F8: official JDBC SessionRepository (AI_SESSION / AI_SESSION_EVENT tables) -> sessions survive restarts
+	implementation("org.springframework.ai:spring-ai-starter-model-session-jdbc")
+	implementation("org.springframework.boot:spring-boot-starter-flyway")
+	implementation("org.flywaydb:flyway-database-postgresql")
+	runtimeOnly("org.postgresql:postgresql")
 	// F1: modular RAG (RetrievalAugmentationAdvisor, query transformers, augmenters)
 	implementation("org.springframework.ai:spring-ai-rag")
 	// F1: Spring AI 2.1 sessions (replaces ChatMemory) + the advisors that plug them into ChatClient

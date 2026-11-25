@@ -175,13 +175,13 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
     @Test
     fun `history of unknown session is 404`() {
-        given(chatService.history("nope")).willReturn(null)
+        given(chatService.history("nope", null)).willReturn(null)
         mvc.get("/kotlin/chat/sessions/nope").andExpect { status { isNotFound() } }
     }
 
     @Test
     fun `history returns session messages`() {
-        given(chatService.history("c-1")).willReturn(listOf(HistoryMessage("user", "hi"), HistoryMessage("assistant", "hello")))
+        given(chatService.history("c-1", null)).willReturn(listOf(HistoryMessage("user", "hi"), HistoryMessage("assistant", "hello")))
         mvc.get("/kotlin/chat/sessions/c-1").andExpect {
             status { isOk() }
             jsonPath("$[1].role") { value("assistant") }
@@ -260,5 +260,46 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             status { isOk() }
             content { string(org.hamcrest.Matchers.containsString("research")) }
         }
+    }
+
+    @Test
+    fun `X-User-Id header owns the conversation`() {
+        given(chatService.ask("What is a data class?", AskOptions(userId = "alice"))).willReturn(RagAnswer("A data class.", emptyList(), "c-9"))
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            header(USER_HEADER, "alice")
+            content = """{"question":"What is a data class?"}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.conversationId") { value("c-9") }
+        }
+    }
+
+    @Test
+    fun `invalid X-User-Id is a bad request`() {
+        mvc.post("/kotlin/chat/ask") {
+            contentType = MediaType.APPLICATION_JSON
+            header(USER_HEADER, "alice; drop table")
+            content = """{"question":"What is a data class?"}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("X-User-Id")) }
+        }
+    }
+
+    @Test
+    fun `sessions lists the caller's conversations`() {
+        given(chatService.sessions("alice")).willReturn(listOf(SessionSummary("c-1", java.time.Instant.parse("2026-11-25T07:00:00Z"), null, 4)))
+        mvc.get("/kotlin/chat/sessions") { header(USER_HEADER, "alice") }.andExpect {
+            status { isOk() }
+            jsonPath("$[0].conversationId") { value("c-1") }
+            jsonPath("$[0].messages") { value(4) }
+        }
+    }
+
+    @Test
+    fun `history of another user's session is 404`() {
+        given(chatService.history("c-1", "bob")).willReturn(null)
+        mvc.get("/kotlin/chat/sessions/c-1") { header(USER_HEADER, "bob") }.andExpect { status { isNotFound() } }
     }
 }

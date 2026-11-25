@@ -25,7 +25,8 @@ data class AskRequest(
     // F5: answer-model override, one of rag.eval.models (validated in ChatService -> 400 otherwise)
     @Size(max = 64) val model: String? = null,
 ) {
-    fun toOptions() = AskOptions(RetrievalFilter.of(source, sources, topics), conversationId, rerank, decisionFilter, model)
+    fun toOptions(userId: String? = null) =
+        AskOptions(RetrievalFilter.of(source, sources, topics), conversationId, rerank, decisionFilter, model, userId)
 }
 
 data class OpsRequest(
@@ -76,23 +77,29 @@ class KotlinController(
     fun search(@RequestParam q: String, @RequestParam(defaultValue = "4") k: Int): List<SearchHit> =
         docsService.search(q, k.coerceIn(1, 20))
 
+    /** F8: optional X-User-Id header = owner of the conversation (default rag.default-user). */
     @PostMapping("/chat/ask")
-    fun ask(@Valid @RequestBody request: AskRequest): RagAnswer =
-        chatService.ask(request.question.trim(), request.toOptions())
+    fun ask(@Valid @RequestBody request: AskRequest, @RequestHeader(USER_HEADER, required = false) user: String?): RagAnswer =
+        chatService.ask(request.question.trim(), request.toOptions(validUser(user)))
 
     /** Streaming variant of /chat/ask (Server-Sent Events). Try: curl -N ... */
     @PostMapping("/chat/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
-    fun stream(@Valid @RequestBody request: AskRequest): Flux<ServerSentEvent<Any>> =
-        chatService.stream(request.question.trim(), request.toOptions())
+    fun stream(@Valid @RequestBody request: AskRequest, @RequestHeader(USER_HEADER, required = false) user: String?): Flux<ServerSentEvent<Any>> =
+        chatService.stream(request.question.trim(), request.toOptions(validUser(user)))
 
-    /** F1: messages the session currently sends to the model (after compaction). */
+    /** F8: the caller's chat sessions (persisted in Postgres), newest first. */
+    @GetMapping("/chat/sessions")
+    fun sessions(@RequestHeader(USER_HEADER, required = false) user: String?): List<SessionSummary> =
+        chatService.sessions(validUser(user))
+
+    /** F1: messages the session currently sends to the model (after compaction). F8: only the owner sees it. */
     @GetMapping("/chat/sessions/{id}")
-    fun history(@PathVariable id: String): ResponseEntity<List<HistoryMessage>> =
-        chatService.history(id)?.let { ResponseEntity.ok(it) } ?: ResponseEntity.notFound().build()
+    fun history(@PathVariable id: String, @RequestHeader(USER_HEADER, required = false) user: String?): ResponseEntity<List<HistoryMessage>> =
+        chatService.history(id, validUser(user))?.let { ResponseEntity.ok(it) } ?: ResponseEntity.notFound().build()
 
     @DeleteMapping("/chat/sessions/{id}")
-    fun forget(@PathVariable id: String): ResponseEntity<Unit> {
-        chatService.forget(id)
+    fun forget(@PathVariable id: String, @RequestHeader(USER_HEADER, required = false) user: String?): ResponseEntity<Unit> {
+        chatService.forget(id, validUser(user))
         return ResponseEntity.noContent().build()
     }
 
@@ -131,8 +138,13 @@ class KotlinController(
             EvalVariant.parse(request?.variants), request?.limit, request?.ids, request?.models.orEmpty(), request?.difficulty,
         )
 
-    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant; F5: unknown model. */
-    @ExceptionHandler(InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class, InvalidModelException::class)
+    private fun validUser(user: String?) = user?.let(UserDirectory::requireValidId)
+
+    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant; F5: unknown model; F8: bad X-User-Id. */
+    @ExceptionHandler(
+        InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class,
+        InvalidModelException::class, InvalidUserIdException::class,
+    )
     fun badRequest(e: RuntimeException): ResponseEntity<Map<String, String?>> =
         ResponseEntity.badRequest().body(mapOf("error" to e.message))
 

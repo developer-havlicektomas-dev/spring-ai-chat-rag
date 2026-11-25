@@ -11,7 +11,6 @@ import org.springframework.ai.session.advisor.SessionAdvisors
 import org.springframework.http.codec.ServerSentEvent
 import org.springframework.stereotype.Service
 import reactor.core.publisher.Flux
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class SourceRef(val source: String?, val score: Double?)
@@ -64,6 +63,8 @@ data class AskOptions(
     val decisionFilter: Boolean? = null,
     /** F5: answer-model override (must be in rag.eval.models); null = spring.ai.openai.chat.options.model */
     val model: String? = null,
+    /** F8: owner of the conversation (X-User-Id); null = rag.default-user */
+    val userId: String? = null,
 )
 
 @Service
@@ -72,6 +73,7 @@ class ChatService(
     private val sessionService: SessionService,
     private val props: RagProperties,
     private val models: ModelCatalog,
+    private val userSessions: UserSessions,
 ) {
 
     /**
@@ -82,7 +84,8 @@ class ChatService(
 
     /** F4: the answer plus the exact chunks the model saw, so evaluators can judge the answer against them. */
     fun askWithContext(question: String, options: AskOptions = AskOptions()): AnswerWithContext {
-        val id = options.conversationId ?: newConversationId()
+        // F8: creates the session owned by the caller (or checks ownership) before SessionAdvisors loads it
+        val id = userSessions.open(user(options.userId), options.conversationId)
         val response = prompt(question, options, id).call().chatClientResponse()
         val documents = response.documents()
         val type = answerType(documents)
@@ -108,7 +111,7 @@ class ChatService(
      * Errors become an `error` event instead of a broken connection.
      */
     fun stream(question: String, options: AskOptions = AskOptions()): Flux<ServerSentEvent<Any>> {
-        val id = options.conversationId ?: newConversationId()
+        val id = userSessions.open(user(options.userId), options.conversationId)
         val retrievalSent = AtomicBoolean(false)
         val tokens = prompt(question, options, id).stream().chatClientResponse()
             .concatMap { chunk ->
@@ -131,14 +134,23 @@ class ChatService(
             .onErrorResume { e -> Flux.just(event("error", e.message ?: "stream failed")) }
     }
 
-    /** What the session currently feeds the model (after compaction), oldest first; null if unknown/expired. */
-    fun history(conversationId: String): List<HistoryMessage>? {
-        sessionService.findById(conversationId) ?: return null
+    /**
+     * What the session currently feeds the model (after compaction), oldest first;
+     * null if unknown/expired or owned by another user (F8).
+     */
+    fun history(conversationId: String, userId: String? = null): List<HistoryMessage>? {
+        userSessions.find(user(userId), conversationId) ?: return null
         return sessionService.getActiveMessages(conversationId)
             .map { HistoryMessage(it.messageType.name.lowercase(), it.text.orEmpty()) }
     }
 
-    fun forget(conversationId: String) = sessionService.delete(conversationId)
+    /** F8: only the owner can delete; unknown ids are a no-op (DELETE stays idempotent). */
+    fun forget(conversationId: String, userId: String? = null) = userSessions.delete(user(userId), conversationId)
+
+    /** F8: the caller's sessions, newest first. */
+    fun sessions(userId: String? = null): List<SessionSummary> = userSessions.list(user(userId))
+
+    private fun user(userId: String?) = userId ?: props.defaultUser
 
     internal fun answerType(documents: List<Document>): AnswerType = when {
         documents.isNotEmpty() -> AnswerType.GROUNDED
@@ -158,8 +170,6 @@ class ChatService(
                 options.rerank?.let { spec.param(RagContext.RERANK, it) }
                 options.decisionFilter?.let { spec.param(RagContext.DECISION_FILTER, it) }
             }
-
-    private fun newConversationId() = UUID.randomUUID().toString()
 
     private fun event(name: String, data: Any): ServerSentEvent<Any> =
         ServerSentEvent.builder(data).event(name).build()

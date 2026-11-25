@@ -60,7 +60,7 @@ class RagEvalTest {
         val broken = Evaluator { throw IllegalStateException("judge down") }
         val r = runner({ _, o -> seen += o; answer(AnswerType.GROUNDED, listOf(doc("coroutines.md")), rerankMs = 300) }, factCheck = broken, forgotten = forgotten)
             .evaluate(inScope, EvalVariant.FULL)
-        assertEquals(AskOptions(rerank = true, decisionFilter = true), seen.single())
+        assertEquals(AskOptions(rerank = true, decisionFilter = true, userId = EVAL_USER), seen.single())
         assertEquals(listOf("c"), forgotten)
         assertEquals(300, r.decisionMs)
         assertNull(r.grounded)

@@ -23,6 +23,12 @@ data class RagProperties(
     /** F3: per-batch timeout for DecisionModel calls (reranker, filter, gate). */
     val decisionTimeoutSeconds: Long = 20,
     val eval: EvalSettings = EvalSettings(),
+    /** F8: which store backs RAG (also sets spring.ai.vectorstore.type, see application.yml). */
+    val vectorStore: StoreKind = StoreKind.QDRANT,
+    /** F8: where users, chat sessions and agent memory live. */
+    val persistence: Persistence = Persistence.JDBC,
+    /** F8: user for requests without an X-User-Id header (keeps old curl examples and scripts working). */
+    val defaultUser: String = "anonymous",
 ) {
     init {
         ChunkSettings(chunkSize, chunkOverlap) // validates
@@ -57,6 +63,22 @@ data class EvalSettings(
     val reportFile: String = "build/reports/rag-eval/rag-eval.md",
     val comparisonReportFile: String = "build/reports/rag-eval/model-comparison.md",
 )
+
+/** F8: the vector stores the app can use; [wire] = rag.vector-store / spring.ai.vectorstore.type value. */
+enum class StoreKind(@get:com.fasterxml.jackson.annotation.JsonValue val wire: String) {
+    QDRANT("qdrant"), PGVECTOR("pgvector");
+
+    override fun toString() = wire
+
+    companion object {
+        fun of(value: String): StoreKind =
+            entries.firstOrNull { it.wire.equals(value, ignoreCase = true) }
+                ?: throw IllegalArgumentException("Unknown vector store '$value', expected one of ${entries.map { it.wire }}")
+    }
+}
+
+/** F8: jdbc = Postgres (survives restarts), memory = F1-F7 behaviour (no database needed). */
+enum class Persistence { JDBC, MEMORY }
 
 class InvalidChunkSettingsException(message: String) : RuntimeException(message)
 

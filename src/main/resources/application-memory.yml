@@ -1,0 +1,11 @@
+# F8: run without Postgres (Qdrant only): SPRING_PROFILES_ACTIVE=memory
+# Sessions, users and Koog agent memory live in memory again (lost on restart), like F1-F7.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+  flyway:
+    enabled: false
+rag:
+  persistence: memory
+  vector-store: qdrant
