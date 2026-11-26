@@ -29,6 +29,10 @@ class PersistenceConfig {
 
         @Bean
         fun agentMemoryStore(jdbc: JdbcClient): AgentMemoryStore = JdbcAgentMemoryStore(jdbc)
+
+        /** F9: daily Study Guide quota + generation log (V4__study_plans_and_usage.sql). */
+        @Bean
+        fun studyUsageStore(jdbc: JdbcClient): StudyUsageStore = JdbcStudyUsageStore(jdbc)
     }
 
     @Configuration
@@ -42,6 +46,9 @@ class PersistenceConfig {
 
         @Bean
         fun agentMemoryStore(): AgentMemoryStore = InMemoryAgentMemoryStore()
+
+        @Bean
+        fun studyUsageStore(): StudyUsageStore = InMemoryStudyUsageStore()
     }
 }
 

@@ -64,7 +64,7 @@ class PostgresPersistenceTest {
     fun `flyway created the session, user and agent memory tables`() {
         val tables = jdbc.sql("SELECT table_name FROM information_schema.tables WHERE table_schema = :s")
             .param("s", schema).query(String::class.java).list().map { it!!.lowercase() }.toSet()
-        assertEquals(true, tables.containsAll(setOf("ai_session", "ai_session_event", "ai_session_index", "app_user", "agent_memory", "chat_session_overview")), tables.toString())
+        assertEquals(true, tables.containsAll(setOf("ai_session", "ai_session_event", "ai_session_index", "app_user", "agent_memory", "chat_session_overview", "study_usage", "study_generation")), tables.toString())
     }
 
     @Test
@@ -94,6 +94,30 @@ class PostgresPersistenceTest {
         assertEquals("free", again.plan)
         assertEquals(false, again.lastSeenAt.isBefore(first.lastSeenAt))
         assertNull(users.find("nobody"))
+    }
+
+    @Test
+    fun `F9 plan switch, plan check constraint and atomic daily quota under concurrency`() {
+        val users = JdbcUserDirectory(jdbc)
+        assertEquals("pro", users.setPlan("dora", "pro").plan)
+        assertEquals("pro", users.touch("dora").plan)
+        val bad = runCatching { users.setPlan("dora", "platinum") }
+        assertEquals(true, bad.isFailure) // V4 CHECK (plan IN ('free','pro'))
+
+        val usage = JdbcStudyUsageStore(jdbc)
+        val user = users.touch("erik")
+        val day = java.time.LocalDate.of(2026, 11, 26)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        val results = (1..20).map { pool.submit<Int?> { usage.tryConsume(user.id, day, 5) } }.map { it.get() }
+        pool.shutdown()
+        assertEquals((1..5).toList(), results.filterNotNull().sorted()) // exactly 5 winners, never 6
+        assertEquals(5, usage.used(user.id, day))
+        usage.refund(user.id, day)
+        assertEquals(4, usage.used(user.id, day))
+        assertEquals(0, usage.used(user.id, day.plusDays(1)))
+
+        usage.record(GenerationRecord(user.id, Plan.FREE, setOf(StudyFeature.QUIZ, StudyFeature.EXPLANATION), 300, 1, 3, "grounded", "gpt-4o-mini", 900, 400, 4200))
+        assertEquals("EXPLANATION,QUIZ", jdbc.sql("SELECT features FROM study_generation WHERE user_id = :u").param("u", user.id).query(String::class.java).single())
     }
 
     @Test

@@ -27,6 +27,9 @@ interface UserDirectory {
 
     fun find(externalId: String): AppUser?
 
+    /** F9: switch the user's plan ("free" / "pro"); creates the user if needed. Billing would call this later. */
+    fun setPlan(externalId: String, plan: String): AppUser
+
     companion object {
         private val VALID_ID = Regex("[A-Za-z0-9._@-]{1,64}")
 
@@ -58,6 +61,19 @@ class JdbcUserDirectory(private val jdbc: JdbcClient) : UserDirectory {
             .optional()
             .orElse(null)
 
+    override fun setPlan(externalId: String, plan: String): AppUser =
+        jdbc.sql(
+            """
+            INSERT INTO app_user (external_id, plan) VALUES (:externalId, :plan)
+            ON CONFLICT (external_id) DO UPDATE SET plan = EXCLUDED.plan, last_seen_at = now()
+            RETURNING id, external_id, plan, created_at, last_seen_at
+            """.trimIndent()
+        )
+            .param("externalId", UserDirectory.requireValidId(externalId))
+            .param("plan", plan)
+            .query { rs, _ -> rs.toUser() }
+            .single()
+
     private fun ResultSet.toUser() = AppUser(
         id = getObject("id", UUID::class.java),
         externalId = getString("external_id"),
@@ -78,4 +94,9 @@ class InMemoryUserDirectory : UserDirectory {
     }
 
     override fun find(externalId: String): AppUser? = users[externalId]
+
+    override fun setPlan(externalId: String, plan: String): AppUser {
+        touch(externalId)
+        return users.computeIfPresent(externalId) { _, old -> old.copy(plan = plan) }!!
+    }
 }

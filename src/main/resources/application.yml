@@ -8,7 +8,7 @@ spring:
     username: ${POSTGRES_USER:rag}
     password: ${POSTGRES_PASSWORD:rag}   # local dev default only
   flyway:
-    enabled: true   # src/main/resources/db/migration (V1 = Spring AI session schema, V2 = app_user, V3 = agent memory)
+    enabled: true   # src/main/resources/db/migration (V1 = Spring AI session schema, V2 = app_user, V3 = agent memory, V4 = study plans + usage)
   mvc:
     async:
       request-timeout: 2m   # SSE streams run on MVC async; default timeout can cut long answers
@@ -73,6 +73,23 @@ rag:
   # F7: allow-list for the research agent's fetchWebPage tool (https only, host or subdomain)
   web:
     allowed-hosts: ${RAG_WEB_ALLOWED_HOSTS:kotlinlang.org,docs.spring.io,docs.koog.ai,api.koog.ai}
+  # F9: AI Study Guide spike (POST /kotlin/study/generate): plan limits, chunking, dev plan switch
+  study:
+    dev-plan-switch: ${RAG_STUDY_DEV_PLAN_SWITCH:false}   # PUT /kotlin/study/plan (dev only, stand-in for billing)
+    chunk-chars: 1200
+    window-chars: 12000
+    free:
+      features: [EXPLANATION, QUIZ]
+      difficulties: [EASY, MEDIUM]
+      max-quiz-size: 5
+      max-note-chars: 6000
+      daily-generations: ${RAG_STUDY_FREE_DAILY:3}
+    pro:
+      features: [EXPLANATION, QUIZ, FLASHCARDS]
+      difficulties: [EASY, MEDIUM, HARD]
+      max-quiz-size: 15
+      max-note-chars: 40000
+      daily-generations: ${RAG_STUDY_PRO_DAILY:50}
   # F4: golden-set evals (POST /kotlin/evals/run or ./gradlew evalRag)
   eval:
     # F5: one fixed judge for every compared model (stronger than the answer models; non-reasoning so temperature 0 works)
