@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Day 10: send the same questions to the RAG chain and the Koog agent and print
+# F10: run the app with SPRING_PROFILES_ACTIVE=dev (no API keys), or the calls below get 401.
 # answer, sources/tool calls and latency side by side. Needs the app on :8080 with docs ingested.
 # Usage: scripts/compare-rag-vs-agent.sh [base-url]
 set -euo pipefail
