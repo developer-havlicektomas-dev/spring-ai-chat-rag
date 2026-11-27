@@ -12,9 +12,11 @@ Optional overrides: `CHAT_MODEL` (default `gpt-4o-mini`), `QDRANT_HOST`, `QDRANT
 
 ## Run
 ```bash
-./gradlew build      # runs offline; tests mock the services
-./gradlew bootRun
+./gradlew build      # runs offline; tests mock the services (PostgresPersistenceTest runs only if Postgres answers)
+SPRING_PROFILES_ACTIVE=dev ./gradlew bootRun   # F10: dev = no API keys, X-User-Id trusted (all examples below)
 ```
+F10: without the `dev` profile every endpoint except `/actuator/health` needs an `X-API-Key` header, see
+[Hardening + wrap-up (F10)](#hardening--wrap-up-f10). The examples in the F1-F9 sections assume the `dev` profile.
 
 ## Try it
 ```bash
@@ -592,3 +594,189 @@ was refused until the prompt said short notes are fine; a note with "ignore all 
 model refuse (fallback) - safe, but it wasted the user's material, so a real app should strip/flag such lines first.
 Grounding is quote-based: it proves the cited text exists, not that it implies the answer (an LLM-judge check like F4's
 FactCheckingEvaluator would be the next step).
+
+## Hardening + wrap-up (F10)
+
+F10 turns the learning app into something you could put on the internet: API key auth, rate limiting, one error
+format, cost guardrails, timeouts/retries, a Dockerfile and deploy notes. No real deploy was done.
+
+### What F1-F10 built
+
+| Step | Topic | Main pieces |
+|------|-------|-------------|
+| Days 1-10 | RAG basics, Koog bridge + agent | `DocsService` (Markdown -> chunks -> Qdrant), `/kotlin/chat/ask` + SSE `/chat/stream`, Koog `PromptExecutor` over Spring AI, `/agent/ask` |
+| F1 | Spring AI 2.1 sessions + modular RAG | `SessionService` + compaction, `RetrievalAugmentationAdvisor`, follow-up query rewrite |
+| F2 | Tool confirmation | `/kotlin/ops/ask` + `/ops/confirm` (destructive tools pause for approval) |
+| F3 | Better retrieval | metadata filters, OpenAI Decisions rerank/filter, sufficiency gate -> labeled fallback, citations, chunk experiment |
+| F4 | RAG evals | golden set, LLM judges, `./gradlew evalRag`, `POST /kotlin/evals/run` |
+| F5 | Model comparison | per-request model, price table (`rag.eval.models`), `gen_ai` token metrics |
+| F6 | Koog strategies | custom graph -> typed `StudyPack`, `/agent/study`, Mermaid graph |
+| F7 | Koog tools + memory | research agent (docs search, calculator, allow-listed fetch), ChatMemory, traces, Spring AI twin, `/agent/compare` |
+| F8 | Postgres + pgvector | Qdrant vs pgvector switch + compare, JDBC sessions, `app_user`, agent memory in JSONB, Flyway |
+| F9 | AI Study Guide spike | `/kotlin/study/generate` (structured output, grounded quotes), FREE/PRO guard (402), atomic daily quota (429) |
+| F10 | Hardening + wrap-up | Spring Security API keys, token-bucket rate limit, RFC 9457 errors, budgets + spend cap + kill switch, timeouts, Dockerfile |
+
+### Endpoints
+
+All need `X-API-Key` (or the `dev` profile) except health. "LLM" = rate limited + budget checked.
+
+| Method + path | What | LLM |
+|---|---|---|
+| `GET /actuator/health`, `/actuator/health/{liveness,readiness}` | public health (status only) | |
+| `GET /actuator/metrics/**` | Micrometer metrics (e.g. `gen_ai.client.token.usage`) | |
+| `POST /kotlin/docs/ingest`, `GET /kotlin/docs/search?q=&k=` | ingest bundled docs / vector search | |
+| `POST /kotlin/chat/ask`, `POST /kotlin/chat/stream` (SSE) | RAG answer with citations, sessions via `conversationId` | yes |
+| `GET /kotlin/chat/sessions`, `GET`/`DELETE /kotlin/chat/sessions/{id}` | the caller's sessions / history | |
+| `POST /kotlin/chat/tools` | Spring AI tool calling (F7 tools) | yes |
+| `POST /kotlin/koog/ask`, `/kotlin/agent/ask`, `/agent/study`, `/agent/research`, `/agent/compare` | Koog bridge, agent, graph strategy, research agent, Koog vs Spring AI | yes |
+| `GET /kotlin/agent/study/graph`, `GET`/`DELETE /kotlin/agent/research/{id}/memory` | Mermaid graph / agent memory | |
+| `POST /kotlin/ops/ask`, `/kotlin/ops/confirm` | tool confirmation flow | yes |
+| `POST /kotlin/evals/run` | golden-set evals | yes |
+| `GET /kotlin/vectorstores`, `POST /kotlin/vectorstores/{store}/ingest`, `POST /kotlin/vectorstores/compare` | Qdrant vs pgvector | |
+| `POST /kotlin/study/generate`, `GET /kotlin/study/usage`, `PUT /kotlin/study/plan` (dev only) | Study Guide | generate |
+| `GET /kotlin/usage` | F10: today's tokens/cost vs. the plan budget + rate-limit bucket | |
+
+### Security
+
+- `Security.kt`: a stateless Spring Security 7.1 filter chain (no sessions, no CSRF - there are no cookies). The
+  `ApiKeyAuthenticationFilter` SHA-256-hashes the `X-API-Key` and compares it with **every** configured hash using
+  `MessageDigest.isEqual` (constant time). Only hashes are configured; keys are random 256-bit tokens, so a fast hash
+  is enough (bcrypt/argon2 are for guessable passwords).
+- The key decides the user: controllers take `@CallerId user: String?`, resolved from the principal.
+  `X-User-Id` that differs from the key's user -> 403, so a client can't act as someone else.
+- Unknown key -> 401 at once; no key -> 401 from the entry point (`WWW-Authenticate: ApiKey header="X-API-Key"`).
+  `/actuator/health/**` is public and shows status only (`show-details: never`).
+- Dev mode: `rag.security.enabled=false` (profile `dev`) restores the F8/F9 behaviour (`X-User-Id` trusted,
+  default `rag.default-user`). The web-slice tests run in this mode (`@DevSecurity`), `ApiKeySecurityTest` in key mode.
+
+```bash
+scripts/new-api-key.sh alice 0      # prints the key once + RAG_SECURITY_API_KEYS_0_* env vars (hash only)
+```
+
+### Limits and cost guardrails
+
+Order in `LlmGuardInterceptor` (POST on the LLM paths, `rag.rate-limit.paths`):
+
+1. body > `rag.limits.max-body-bytes` (256 KB) -> **413** `PAYLOAD_TOO_LARGE`
+2. kill switch `rag.budget.kill-switch` -> **503** `LLM_DISABLED`; all users' cost today >= `rag.budget.global-daily-usd` -> **503** `SPEND_CAP_REACHED`
+3. token bucket per caller (`capacity` burst, `refill-tokens` per `refill-period`, refilled continuously) -> **429** `RATE_LIMITED` + `Retry-After`.
+   Every LLM response carries `RateLimit-Policy: "llm";q=10;w=60` and `RateLimit: "llm";r=<remaining>;t=<seconds to full>` (IETF draft).
+4. the caller's daily budget by plan (`rag.budget.free|pro.daily-tokens|daily-usd`) -> **429** `BUDGET_EXCEEDED` + `Retry-After` until 00:00 UTC
+5. F9 Study Guide plan limits (**402** `PLAN_LIMIT`) and daily generations (**429** `DAILY_QUOTA_EXCEEDED`) stay separate, in `StudyGuard`.
+
+Recording: `LlmUsageObservationHandler` listens to Spring AI's chat model observation (the one behind
+`gen_ai.client.token.usage`), so every model call is booked - RAG answer, Koog agent turns, parallel study windows,
+SSE streams (`stream_options.include_usage`) - with the price from the F5 table (dated snapshots like
+`gpt-4o-mini-2024-07-18` resolve to `gpt-4o-mini`; unknown models count tokens only, `unpricedCalls`). The caller
+reaches coroutine and Reactor threads through `spring.reactor.context-propagation=auto` (Spring adds
+`PropagationContextElement` to suspend handlers; Spring Security registers a `ThreadLocalAccessor`). Calls outside a
+request (startup evals) are booked on user `system`. Storage: Flyway `V5__llm_usage.sql`, one atomic upsert per call.
+
+Answer size: `rag.limits.chat-max-completion-tokens` (800) on `/chat/*`, `spring.ai.openai.chat.options.max-completion-tokens`
+(4096) for everything else; `/chat` questions stay capped at 2 000 chars (`@Size`), study notes by plan.
+
+Not covered (documented trade-offs): the budget is checked before a request, so one in-flight request can overshoot
+by its own size; OpenAI Decisions API calls (rerank/filter/sufficiency) and embeddings are not priced; rate-limit
+buckets are in memory per instance (use Bucket4j with Redis/Postgres behind several replicas).
+
+### Errors (RFC 9457)
+
+`ApiExceptionHandler` is the only `@RestControllerAdvice` (the F1-F9 per-controller handlers are gone). Every error is
+`application/problem+json` with `type`, `title`, `status`, `detail` and a stable `code`; clients switch on `code`.
+Since F10 the old `{"error": "..."}` text is in `detail`; the F9 402/429 members (`reason`, `plan`, `limit`, `requested`,
+`upgradeTo`, `used`, `resetsAt`) are unchanged.
+
+| code | status | when |
+|---|---|---|
+| `VALIDATION_FAILED` | 400 | `@Valid` body, with `errors: [{field, message}]` |
+| `INVALID_REQUEST` | 400/405 | bad filter/model/user id/JSON, wrong method |
+| `UNAUTHENTICATED` | 401 | no or unknown API key |
+| `FORBIDDEN` | 403 | `X-User-Id` of another user |
+| `NOT_FOUND` / `CONFLICT` | 404 / 409 | unknown conversation or route / ops call not waiting |
+| `PLAN_LIMIT` | 402 | Study Guide feature not in plan |
+| `PAYLOAD_TOO_LARGE` | 413 | body over `rag.limits.max-body-bytes` |
+| `CONTENT_FILTERED` | 422 | provider content filter |
+| `RATE_LIMITED` / `BUDGET_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` | 429 | bucket empty / daily LLM budget / study generations (all with `Retry-After`) |
+| `LLM_DISABLED` / `SPEND_CAP_REACHED` | 503 | kill switch / global daily spend cap |
+| `LLM_RATE_LIMITED` / `LLM_UNAVAILABLE` | 503 | OpenAI 429 / 5xx, connection or credential problems (`Retry-After`) |
+| `LLM_TIMEOUT` | 504 | OpenAI read timeout (after the SDK's retries) |
+| `LLM_BAD_RESPONSE` | 502 | OpenAI rejected the request (4xx) or sent garbage |
+| `INTERNAL_ERROR` | 500 | a bug; logged with stack trace, never echoed |
+
+Upstream errors are found by walking the cause chain (Koog, coroutines and Reactor wrap the OpenAI SDK exceptions);
+the provider's message is logged, the client gets a fixed text. SSE streams can't change status once started, so they
+end with `event:error` + `LLM_TIMEOUT: ...` instead. Resilience: `spring.ai.openai.timeout` (`OPENAI_TIMEOUT`, 60 s) and
+`max-retries` (`OPENAI_MAX_RETRIES`, 2; the SDK retries connection errors, 408/409/429/5xx with backoff).
+
+### Configuration added in F10
+
+| env var | default | meaning |
+|---|---|---|
+| `RAG_SECURITY_ENABLED` | `true` | `false` = dev mode (also via `SPRING_PROFILES_ACTIVE=dev`) |
+| `RAG_SECURITY_API_KEYS_<n>_USER_ID` / `_SHA256` / `_NAME` | - | API keys (hash only), `scripts/new-api-key.sh` |
+| `RAG_RATE_LIMIT_ENABLED` / `_CAPACITY` / `_REFILL` / `_PERIOD` | `true` / 10 / 10 / `1m` | token bucket per caller |
+| `RAG_BUDGET_ENABLED` | `true` | per-user budgets + global cap |
+| `RAG_LLM_KILL_SWITCH` | `false` | 503 on every LLM endpoint |
+| `RAG_GLOBAL_DAILY_USD` | `5.00` | all users together, per UTC day |
+| `RAG_BUDGET_FREE_DAILY_TOKENS` / `_USD` | 200000 / 0.10 | free plan per user and day |
+| `RAG_BUDGET_PRO_DAILY_TOKENS` / `_USD` | 2000000 / 2.00 | pro plan |
+| `RAG_MAX_BODY_BYTES` | 262144 | 413 above |
+| `RAG_CHAT_MAX_COMPLETION_TOKENS` | 800 | `/chat` answer cap |
+| `OPENAI_MAX_COMPLETION_TOKENS` | 4096 | global answer cap |
+| `OPENAI_TIMEOUT` / `OPENAI_MAX_RETRIES` | `60s` / 2 | OpenAI client |
+
+### Try it (API key mode)
+
+```bash
+scripts/new-api-key.sh alice 0     # export the printed RAG_SECURITY_API_KEYS_0_* vars, keep the key
+SPRING_DOCKER_COMPOSE_ENABLED=false ./gradlew bootRun   # box: Postgres via /workspace/tools/postgres/start-postgres.sh
+KEY=<your-api-key>
+curl -i localhost:8080/actuator/health                                    # 200, public
+curl -i -X POST localhost:8080/kotlin/chat/ask -H 'Content-Type: application/json' -d '{"question":"What is a data class?"}'   # 401
+curl -X POST localhost:8080/kotlin/chat/ask -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"question":"What is a data class?"}'                            # 200 + RateLimit headers
+curl -H "X-API-Key: $KEY" localhost:8080/kotlin/usage                     # tokens, cost, budget, bucket
+for i in $(seq 1 12); do curl -s -o /dev/null -w '%{http_code} ' -X POST localhost:8080/kotlin/koog/ask \
+     -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{"question":"Is Kotlin statically typed?"}' & done; wait  # ... 429
+```
+
+### Deploy notes (sketch, nothing deployed)
+
+- **Image**: `Dockerfile` = multi-stage (JDK 21 build with the Gradle wrapper -> JRE 21 runtime), Spring Boot layered
+  jar (`-Djarmode=tools extract --layers`), non-root user 10001, `MaxRAMPercentage=75`. Not built on the dev box
+  (no Docker there); build it on the Mac or in CI: `docker build -t spring-ai-kotlin-rag .`
+- **Env**: `OPENAI_API_KEY`, `POSTGRES_URL` / `POSTGRES_USER` / `POSTGRES_PASSWORD`, `QDRANT_HOST` / `QDRANT_GRPC_PORT`
+  (or `RAG_VECTOR_STORE=pgvector` and skip Qdrant), `RAG_SECURITY_API_KEYS_*`, budgets above. Never the `dev` profile.
+  Secrets come from the platform's secret store, not the image.
+- **Postgres**: 17 with pgvector (`CREATE EXTENSION vector, hstore, "uuid-ossp"` as superuser once); Flyway migrates
+  V1-V5 at start. Managed options: Neon, Supabase, Fly Postgres, Hetzner + self-managed.
+- **Qdrant**: Qdrant Cloud free tier or a container next to the app (gRPC 6334). With pgvector only one database is needed.
+- **Health checks**: liveness `GET /actuator/health/liveness`, readiness `GET /actuator/health/readiness` (public, status only).
+- **Fly.io**: `fly launch --no-deploy` (detects the Dockerfile), `fly secrets set OPENAI_API_KEY=... RAG_SECURITY_API_KEYS_0_SHA256=...`,
+  `[[http_service.checks]] path = "/actuator/health/readiness"`, 1 GB RAM machine, Fly Postgres or Neon.
+- **Render**: Web Service from the repo (Docker runtime), health check path `/actuator/health/readiness`, env group with
+  the secrets, Render Postgres (pgvector is available).
+- **Hetzner**: a small Cloud VM (2 vCPU / 4 GB) with Docker Compose: app + `pgvector/pgvector:0.8.7-pg17` + Qdrant + Caddy for TLS; backups
+  via `pg_dump` cron.
+- **One instance first**: the rate limiter is in memory; scale out only after moving it to Redis/Postgres.
+
+### Results (box, 2026-11-27, API key mode, gpt-4o-mini-2024-07-18)
+
+| request | status | latency |
+|---|---|---|
+| `GET /actuator/health` without key | 200 `{"status":"UP"}` | 174 ms (first call) |
+| `POST /kotlin/chat/ask` without key / wrong key | 401 `UNAUTHENTICATED` | 10 ms / 3 ms |
+| alice's key + `X-User-Id: bob` | 403 `FORBIDDEN` | 2 ms |
+| `POST /kotlin/chat/ask` with key | 200 grounded, 392 + 118 tokens | 4.0 s |
+| `POST /kotlin/study/generate` (pro) | 200 grounded, 2 questions, 866 + 629 tokens | 8.6 s |
+| `POST /kotlin/chat/stream` | 200, 111 token events, `done` | 2.2 s |
+| `POST /kotlin/agent/ask` (Koog, suspend) | 200, 1 tool call | 3.5 s |
+| 7 parallel `/kotlin/koog/ask`, bucket 5 | 5 x 200 (`RateLimit` r=4..0), 2 x 429 `RATE_LIMITED`, `Retry-After: 12` | 0.43-0.76 s / 36-38 ms |
+| free user over `RAG_BUDGET_FREE_DAILY_TOKENS=3000` (3265 used) | 429 `BUDGET_EXCEEDED`, `Retry-After` to 00:00 UTC; also blocks `/study/generate` | 7-299 ms |
+| `OPENAI_TIMEOUT=20ms`, 0 retries | 504 `LLM_TIMEOUT` (chat 313 ms, Koog 453 ms), SSE `event:error LLM_TIMEOUT` | |
+| `RAG_LLM_KILL_SWITCH=true` | 503 `LLM_DISABLED`, `Retry-After: 300` | 184 ms |
+| dev profile, `RAG_GLOBAL_DAILY_USD=0.002` (0.00204 spent) | 503 `SPEND_CAP_REACHED` | 76 ms |
+| `GET /kotlin/usage` | 200 (11 calls, 7002 tokens, $0.002 for alice) | 17 ms |
+
+All model calls - including the SSE stream and the Koog agent's coroutine turns - were booked on the API key's user
+(`llm_usage` had no `system` rows), which confirms the context propagation.

@@ -77,28 +77,28 @@ class KotlinController(
     fun search(@RequestParam q: String, @RequestParam(defaultValue = "4") k: Int): List<SearchHit> =
         docsService.search(q, k.coerceIn(1, 20))
 
-    /** F8: optional X-User-Id header = owner of the conversation (default rag.default-user). */
+    /** F8: owner of the conversation = the caller (F10: the API key's user; dev mode: X-User-Id, default rag.default-user). */
     @PostMapping("/chat/ask")
-    fun ask(@Valid @RequestBody request: AskRequest, @RequestHeader(USER_HEADER, required = false) user: String?): RagAnswer =
+    fun ask(@Valid @RequestBody request: AskRequest, @CallerId user: String?): RagAnswer =
         chatService.ask(request.question.trim(), request.toOptions(validUser(user)))
 
     /** Streaming variant of /chat/ask (Server-Sent Events). Try: curl -N ... */
     @PostMapping("/chat/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
-    fun stream(@Valid @RequestBody request: AskRequest, @RequestHeader(USER_HEADER, required = false) user: String?): Flux<ServerSentEvent<Any>> =
+    fun stream(@Valid @RequestBody request: AskRequest, @CallerId user: String?): Flux<ServerSentEvent<Any>> =
         chatService.stream(request.question.trim(), request.toOptions(validUser(user)))
 
     /** F8: the caller's chat sessions (persisted in Postgres), newest first. */
     @GetMapping("/chat/sessions")
-    fun sessions(@RequestHeader(USER_HEADER, required = false) user: String?): List<SessionSummary> =
+    fun sessions(@CallerId user: String?): List<SessionSummary> =
         chatService.sessions(validUser(user))
 
     /** F1: messages the session currently sends to the model (after compaction). F8: only the owner sees it. */
     @GetMapping("/chat/sessions/{id}")
-    fun history(@PathVariable id: String, @RequestHeader(USER_HEADER, required = false) user: String?): ResponseEntity<List<HistoryMessage>> =
+    fun history(@PathVariable id: String, @CallerId user: String?): ResponseEntity<List<HistoryMessage>> =
         chatService.history(id, validUser(user))?.let { ResponseEntity.ok(it) } ?: ResponseEntity.notFound().build()
 
     @DeleteMapping("/chat/sessions/{id}")
-    fun forget(@PathVariable id: String, @RequestHeader(USER_HEADER, required = false) user: String?): ResponseEntity<Unit> {
+    fun forget(@PathVariable id: String, @CallerId user: String?): ResponseEntity<Unit> {
         chatService.forget(id, validUser(user))
         return ResponseEntity.noContent().build()
     }
@@ -139,20 +139,4 @@ class KotlinController(
         )
 
     private fun validUser(user: String?) = user?.let(UserDirectory::requireValidId)
-
-    /** F3: bad metadata filter values or chunk settings; F4: unknown eval variant; F5: unknown model; F8: bad X-User-Id. */
-    @ExceptionHandler(
-        InvalidFilterException::class, InvalidChunkSettingsException::class, InvalidEvalVariantException::class,
-        InvalidModelException::class, InvalidUserIdException::class,
-    )
-    fun badRequest(e: RuntimeException): ResponseEntity<Map<String, String?>> =
-        ResponseEntity.badRequest().body(mapOf("error" to e.message))
-
-    @ExceptionHandler(ConversationStateException::class)
-    fun conflict(e: ConversationStateException): ResponseEntity<Map<String, String?>> =
-        ResponseEntity.status(409).body(mapOf("error" to e.message))
-
-    @ExceptionHandler(NoSuchElementException::class)
-    fun notFound(e: NoSuchElementException): ResponseEntity<Map<String, String?>> =
-        ResponseEntity.status(404).body(mapOf("error" to e.message))
 }

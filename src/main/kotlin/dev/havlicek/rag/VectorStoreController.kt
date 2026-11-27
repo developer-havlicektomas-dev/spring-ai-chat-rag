@@ -5,7 +5,6 @@ import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.Size
 import org.springframework.core.io.ClassPathResource
-import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 
 /** F8: queries to run against both stores; default = every question of the golden set (evals/golden-qa.json). */
@@ -44,8 +43,4 @@ class VectorStoreController(
         val r = request ?: CompareStoresRequest()
         return comparator.compare(r.queries?.map(String::trim) ?: goldenQuestions, r.topK, r.repeats)
     }
-
-    @ExceptionHandler(IllegalArgumentException::class)
-    fun badRequest(e: IllegalArgumentException): ResponseEntity<Map<String, String?>> =
-        ResponseEntity.badRequest().body(mapOf("error" to e.message))
 }

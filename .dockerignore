@@ -1,0 +1,14 @@
+# F10: keep the build context small and secret-free
+.git
+.gradle
+.kotlin
+.idea
+build
+out
+*.iml
+*.log
+.env
+.env.*
+.DS_Store
+scripts
+compose.yaml

@@ -33,6 +33,10 @@ class PersistenceConfig {
         /** F9: daily Study Guide quota + generation log (V4__study_plans_and_usage.sql). */
         @Bean
         fun studyUsageStore(jdbc: JdbcClient): StudyUsageStore = JdbcStudyUsageStore(jdbc)
+
+        /** F10: LLM tokens + cost per user and day (V5__llm_usage.sql). */
+        @Bean
+        fun llmUsageStore(jdbc: JdbcClient): LlmUsageStore = JdbcLlmUsageStore(jdbc)
     }
 
     @Configuration
@@ -49,6 +53,9 @@ class PersistenceConfig {
 
         @Bean
         fun studyUsageStore(): StudyUsageStore = InMemoryStudyUsageStore()
+
+        @Bean
+        fun llmUsageStore(): LlmUsageStore = InMemoryLlmUsageStore()
     }
 }
 

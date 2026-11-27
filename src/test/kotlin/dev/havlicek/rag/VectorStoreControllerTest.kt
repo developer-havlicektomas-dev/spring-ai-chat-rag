@@ -12,6 +12,7 @@ import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.post
 
 /** F8: web slice for /kotlin/vectorstores (no stores needed). */
+@DevSecurity
 @WebMvcTest(VectorStoreController::class)
 class VectorStoreControllerTest(@Autowired private val mvc: MockMvc) {
     @MockitoBean lateinit var registry: VectorStoreRegistry
@@ -22,7 +23,7 @@ class VectorStoreControllerTest(@Autowired private val mvc: MockMvc) {
     fun `unknown store is a bad request`() {
         mvc.post("/kotlin/vectorstores/chroma/ingest").andExpect {
             status { isBadRequest() }
-            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("chroma")) }
+            jsonPath("$.detail") { value(org.hamcrest.Matchers.containsString("chroma")) }
         }
     }
 

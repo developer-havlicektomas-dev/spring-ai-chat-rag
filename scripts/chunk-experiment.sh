@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # F3: re-ingest the docs with different TokenTextSplitter settings and compare what /docs/search returns.
+# F10: run the app with SPRING_PROFILES_ACTIVE=dev (no API keys), or the calls below get 401.
 # Needs the app on :8080 and jq. Restores the configured settings (rag.chunk-size / rag.chunk-overlap) at the end.
 # Usage: scripts/chunk-experiment.sh [base-url] ["size:overlap" ...]   default settings: 800:0 64:16 32:8 16:0
 set -euo pipefail

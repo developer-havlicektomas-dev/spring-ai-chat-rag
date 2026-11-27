@@ -1,0 +1,9 @@
+# F10: local development - API key auth off, X-User-Id trusted as in F8/F9 (scripts and curl examples keep working),
+# Study Guide plan switch on. Never use this profile on a reachable server.
+#   SPRING_PROFILES_ACTIVE=dev            (Postgres)
+#   SPRING_PROFILES_ACTIVE=memory,dev     (no Postgres)
+rag:
+  security:
+    enabled: false
+  study:
+    dev-plan-switch: true

@@ -64,7 +64,7 @@ class PostgresPersistenceTest {
     fun `flyway created the session, user and agent memory tables`() {
         val tables = jdbc.sql("SELECT table_name FROM information_schema.tables WHERE table_schema = :s")
             .param("s", schema).query(String::class.java).list().map { it!!.lowercase() }.toSet()
-        assertEquals(true, tables.containsAll(setOf("ai_session", "ai_session_event", "ai_session_index", "app_user", "agent_memory", "chat_session_overview", "study_usage", "study_generation")), tables.toString())
+        assertEquals(true, tables.containsAll(setOf("ai_session", "ai_session_event", "ai_session_index", "app_user", "agent_memory", "chat_session_overview", "study_usage", "study_generation", "llm_usage")), tables.toString())
     }
 
     @Test
@@ -156,6 +156,22 @@ class PostgresPersistenceTest {
         store.delete("source == 'sealed-classes.md'")
         val after = store.similaritySearch(SearchRequest.builder().query("sealed").topK(10).similarityThresholdAll().build())
         assertEquals(3, after.size)
+    }
+
+    @Test
+    fun `F10 llm usage upserts are atomic under parallel calls and feed the global spend`() {
+        val users = JdbcUserDirectory(jdbc)
+        val guard = CostGuard(users, JdbcLlmUsageStore(jdbc), ModelCatalog(listOf(EvalModel("gpt-4o-mini", 0.15, 0.60))),
+            BudgetProperties(globalDailyUsd = 1000.0, free = BudgetProperties.PlanBudget(5_000, 10.0)))
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        (1..40).map { pool.submit { guard.record("pg-spender", "gpt-4o-mini-2024-07-18", 100, 25) } }.forEach { it.get() }
+        pool.shutdown()
+        val view = guard.view("pg-spender", null)
+        assertEquals(40, view.calls)
+        assertEquals(5_000L, view.totalTokens)
+        assertEquals(0, java.math.BigDecimal("0.0012").compareTo(view.costUsd)) // 40 * (100*0.15 + 25*0.60) / 1e6
+        org.junit.jupiter.api.assertThrows<BudgetExceededException> { guard.checkBefore("pg-spender") }
+        assertEquals(0, java.math.BigDecimal("0.0012").compareTo(JdbcLlmUsageStore(jdbc).globalCostUsd(java.time.LocalDate.now(java.time.ZoneOffset.UTC))))
     }
 
     companion object {

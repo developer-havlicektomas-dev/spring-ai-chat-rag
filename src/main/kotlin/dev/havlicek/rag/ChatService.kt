@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonValue
 import org.springframework.ai.chat.client.ChatClient
 import org.springframework.ai.chat.client.ChatClientResponse
 import org.springframework.ai.document.Document
+import org.springframework.ai.openai.OpenAiChatOptions
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever
 import org.springframework.ai.session.SessionService
@@ -74,6 +75,8 @@ class ChatService(
     private val props: RagProperties,
     private val models: ModelCatalog,
     private val userSessions: UserSessions,
+    /** F10: answer-size cap (rag.limits.chat-max-completion-tokens) */
+    private val limits: RequestLimitProperties = RequestLimitProperties(),
 ) {
 
     /**
@@ -113,7 +116,7 @@ class ChatService(
     fun stream(question: String, options: AskOptions = AskOptions()): Flux<ServerSentEvent<Any>> {
         val id = userSessions.open(user(options.userId), options.conversationId)
         val retrievalSent = AtomicBoolean(false)
-        val tokens = prompt(question, options, id).stream().chatClientResponse()
+        val tokens = prompt(question, options, id, streaming = true).stream().chatClientResponse()
             .concatMap { chunk ->
                 val events = buildList {
                     if (retrievalSent.compareAndSet(false, true)) {
@@ -131,7 +134,11 @@ class ChatService(
         return Flux.just(event("conversation", mapOf("conversationId" to id)))
             .concatWith(tokens)
             .concatWith(Flux.just(event("done", "[DONE]")))
-            .onErrorResume { e -> Flux.just(event("error", e.message ?: "stream failed")) }
+            // F10: classified, safe message (no provider error text); the HTTP status is already 200 once streaming started
+            .onErrorResume { e -> Flux.just(event("error", UpstreamErrors.safeMessage(e))) }
+            // F10: copy the caller's ThreadLocals (Security principal) into the Reactor context, so the usage
+            // observation that finishes on an HTTP client thread is still booked on the right user
+            .contextCapture()
     }
 
     /**
@@ -158,11 +165,16 @@ class ChatService(
         else -> AnswerType.NO_CONTEXT
     }
 
-    private fun prompt(question: String, options: AskOptions, conversationId: String) =
+    private fun prompt(question: String, options: AskOptions, conversationId: String, streaming: Boolean = false) =
         chatClient.prompt()
             .user(question)
-            // F5: only the answer call switches model; ChatClient merges these over the default options
-            .apply { options.model?.let { options(models.chatOptions(it)) } }
+            // F5: only the answer call switches model; ChatClient merges these over the default options.
+            // F10: answer length cap + token usage in the last stream chunk (stream_options.include_usage) for budgets
+            .options(
+                (options.model?.let { models.chatOptions(it) } ?: OpenAiChatOptions.builder())
+                    .maxCompletionTokens(limits.chatMaxCompletionTokens)
+                    .apply { if (streaming) streamUsage(true) }
+            )
             .advisors(SessionAdvisors.session(conversationId))
             .advisors { spec ->
                 // F3: typed Filter.Expression (FilterExpressionBuilder) instead of string concatenation

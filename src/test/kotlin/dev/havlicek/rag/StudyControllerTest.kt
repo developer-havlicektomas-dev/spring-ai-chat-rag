@@ -29,6 +29,7 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
  * F9: HTTP contract of the Study Guide endpoints with the REAL guard + service (in-memory stores, scripted ChatModel):
  * 200 body, 402 plan limit, 429 quota, 400 validation, dev plan switch hidden by default.
  */
+@DevSecurity
 @WebMvcTest(StudyController::class)
 @Import(StudyControllerTest.Beans::class)
 class StudyControllerTest(@Autowired private val mvc: MockMvc) {
@@ -99,7 +100,7 @@ class StudyControllerTest(@Autowired private val mvc: MockMvc) {
         postGenerate("""{"text":"ok","quizSize":0}""", "alice").andExpect { status { isBadRequest() } }
         generate("""{"text":"ok"}""", "bad user!")
             .andExpect(status().isBadRequest)
-            .andExpect(jsonPath("$.error").value(containsString("X-User-Id")))
+            .andExpect(jsonPath("$.detail").value(containsString("X-User-Id")))
     }
 
     @Test

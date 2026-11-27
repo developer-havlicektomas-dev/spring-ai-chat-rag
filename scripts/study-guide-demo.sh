@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # F9: AI Study Guide spike demo. Needs the app running with RAG_STUDY_DEV_PLAN_SWITCH=true (for the PRO part), jq, curl.
-#   SPRING_DOCKER_COMPOSE_ENABLED=false RAG_STUDY_DEV_PLAN_SWITCH=true ./gradlew bootRun
+# F10: the demo switches users with X-User-Id, so run the app in dev mode (profile "dev" = no API keys + plan switch on):
+#   SPRING_DOCKER_COMPOSE_ENABLED=false SPRING_PROFILES_ACTIVE=dev ./gradlew bootRun
 #   scripts/study-guide-demo.sh [base-url]
 set -euo pipefail
 BASE=${1:-http://localhost:8080}/kotlin/study

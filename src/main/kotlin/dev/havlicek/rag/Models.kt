@@ -39,10 +39,22 @@ class ModelCatalog(models: List<EvalModel>) {
         return (promptTokens * input + completionTokens * output) / 1_000_000
     }
 
+    /**
+     * F10: like [costUsd] but also for the dated snapshot the provider reports ("gpt-4o-mini-2024-07-18" ->
+     * "gpt-4o-mini"); the longest configured name that prefixes the snapshot wins.
+     */
+    fun costUsdResolved(model: String, promptTokens: Int, completionTokens: Int): Double? =
+        resolve(model)?.let { costUsd(it, promptTokens, completionTokens) }
+
+    fun resolve(model: String): String? = byName[model]?.name
+        ?: byName.keys.filter { model.startsWith("$it-") && SNAPSHOT.matches(model.removePrefix("$it-")) }.maxByOrNull { it.length }
+
     /** Per-request override for the RAG answer call only (query rewrite, decision steps and judges keep their models). */
     fun chatOptions(name: String, temperature: Double? = null): OpenAiChatOptions.Builder = answerOptions(require(name), temperature)
 
     companion object {
+        private val SNAPSHOT = Regex("\\d{4}-\\d{2}-\\d{2}")
+
         /** gpt-5 family and o-series are reasoning models: they 400 on any temperature other than the default 1. */
         fun isReasoning(model: String): Boolean = model.startsWith("gpt-5") || Regex("^o\\d").containsMatchIn(model)
 

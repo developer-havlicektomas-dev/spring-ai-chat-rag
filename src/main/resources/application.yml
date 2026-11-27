@@ -12,12 +12,23 @@ spring:
   mvc:
     async:
       request-timeout: 2m   # SSE streams run on MVC async; default timeout can cut long answers
+  # F10: ThreadLocals registered with Micrometer context-propagation (Spring Security's principal, observations)
+  # follow suspend controllers (Spring adds PropagationContextElement) and Reactor streams -> LLM usage is booked
+  # on the right user even when the model call finishes on another thread.
+  reactor:
+    context-propagation: auto
   ai:
     openai:
       api-key: ${OPENAI_API_KEY:missing}   # never hardcode; export OPENAI_API_KEY
+      # F10: resilience of the OpenAI Java SDK client: per-request timeout + SDK retries with exponential backoff
+      # (connection errors, 408/409/429/5xx). Whatever still fails becomes a 503/504 ProblemDetail (ApiExceptionHandler).
+      timeout: ${OPENAI_TIMEOUT:60s}
+      max-retries: ${OPENAI_MAX_RETRIES:2}
       chat:
         options:
           model: ${CHAT_MODEL:gpt-4o-mini}
+          # F10: global answer-size cap for every chat call (Koog, study, agents); /chat answers use rag.limits below
+          max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:4096}
       embedding:
         options:
           model: text-embedding-3-small
@@ -43,11 +54,37 @@ spring:
           initialize-schema: never
 
 rag:
+  # F10: API key auth (Security.kt). enabled=false = dev mode (X-User-Id trusted as in F8/F9; profile "dev").
+  # Keys: only their SHA-256 is configured (scripts/new-api-key.sh). As env vars:
+  #   RAG_SECURITY_API_KEYS_0_USER_ID=alice RAG_SECURITY_API_KEYS_0_SHA256=<64 hex> RAG_SECURITY_API_KEYS_0_NAME=alice-laptop
+  security:
+    enabled: ${RAG_SECURITY_ENABLED:true}
+    api-keys: []
+  # F10: per-caller token bucket on the LLM endpoints (429 RATE_LIMITED + Retry-After + RateLimit headers)
+  rate-limit:
+    enabled: ${RAG_RATE_LIMIT_ENABLED:true}
+    capacity: ${RAG_RATE_LIMIT_CAPACITY:10}       # burst
+    refill-tokens: ${RAG_RATE_LIMIT_REFILL:10}    # ... tokens per refill-period, refilled continuously
+    refill-period: ${RAG_RATE_LIMIT_PERIOD:1m}
+  # F10: cost guardrails - per-plan daily budget per user (429 BUDGET_EXCEEDED), global daily cap and kill switch (503)
+  budget:
+    enabled: ${RAG_BUDGET_ENABLED:true}
+    kill-switch: ${RAG_LLM_KILL_SWITCH:false}
+    global-daily-usd: ${RAG_GLOBAL_DAILY_USD:5.00}
+    free:
+      daily-tokens: ${RAG_BUDGET_FREE_DAILY_TOKENS:200000}
+      daily-usd: ${RAG_BUDGET_FREE_DAILY_USD:0.10}
+    pro:
+      daily-tokens: ${RAG_BUDGET_PRO_DAILY_TOKENS:2000000}
+      daily-usd: ${RAG_BUDGET_PRO_DAILY_USD:2.00}
+  limits:
+    max-body-bytes: ${RAG_MAX_BODY_BYTES:262144}
+    chat-max-completion-tokens: ${RAG_CHAT_MAX_COMPLETION_TOKENS:800}
   # F8: qdrant (default) | pgvector - the store behind RAG, /docs/*, the agents' search tool and evals
   vector-store: ${RAG_VECTOR_STORE:qdrant}
   # F8: jdbc (default, Postgres) | memory (no database; use the "memory" profile, which also turns off the DataSource)
   persistence: ${RAG_PERSISTENCE:jdbc}
-  # F8: who calls without an X-User-Id header
+  # F8: who calls without an X-User-Id header (F10: dev mode only)
   default-user: ${RAG_DEFAULT_USER:anonymous}
   top-k: ${RAG_TOP_K:4}
   similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.3}
@@ -114,6 +151,13 @@ management:
     web:
       exposure:
         include: health,metrics
+  # F10: /actuator/health is public (load balancer / platform checks) but only shows UP/DOWN to anonymous callers;
+  # liveness/readiness groups for Kubernetes-style probes: /actuator/health/liveness, /actuator/health/readiness
+  endpoint:
+    health:
+      show-details: never   # status only; DB/Qdrant details are for logs and metrics, not the internet
+      probes:
+        enabled: true
 
 logging:
   level:

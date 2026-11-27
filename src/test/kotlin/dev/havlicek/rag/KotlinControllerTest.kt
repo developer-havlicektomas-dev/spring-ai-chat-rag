@@ -16,6 +16,7 @@ import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.post
 
 /** Web-slice test: no OpenAI key or Qdrant needed. */
+@DevSecurity
 @WebMvcTest(KotlinController::class)
 class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
 
@@ -34,7 +35,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             content = """{"variants":["baseline","turbo"]}"""
         }.andExpect {
             status { isBadRequest() }
-            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("turbo")) }
+            jsonPath("$.detail") { value(org.hamcrest.Matchers.containsString("turbo")) }
         }
     }
 
@@ -116,7 +117,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             content = """{"question":"hi","topics":["classes' || true"]}"""
         }.andExpect {
             status { isBadRequest() }
-            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("Invalid topic")) }
+            jsonPath("$.detail") { value(org.hamcrest.Matchers.containsString("Invalid topic")) }
         }
     }
 
@@ -283,7 +284,7 @@ class KotlinControllerTest(@Autowired private val mvc: MockMvc) {
             content = """{"question":"What is a data class?"}"""
         }.andExpect {
             status { isBadRequest() }
-            jsonPath("$.error") { value(org.hamcrest.Matchers.containsString("X-User-Id")) }
+            jsonPath("$.detail") { value(org.hamcrest.Matchers.containsString("X-User-Id")) }
         }
     }
 

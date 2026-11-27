@@ -28,6 +28,8 @@ val koogSpringAiVersion = "1.3.0-beta"
 dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
 	implementation("org.springframework.boot:spring-boot-starter-validation")
+	// F10: stateless X-API-Key auth (Spring Security 7.1 filter chain)
+	implementation("org.springframework.boot:spring-boot-starter-security")
 	// F5: Micrometer + /actuator/metrics (Spring AI publishes gen_ai.client.token.usage per model)
 	implementation("org.springframework.boot:spring-boot-starter-actuator")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
@@ -56,6 +58,7 @@ dependencies {
 	developmentOnly("org.springframework.boot:spring-boot-docker-compose")
 	developmentOnly("org.springframework.ai:spring-ai-spring-boot-docker-compose")
 	testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+	testImplementation("org.springframework.boot:spring-boot-starter-security-test")
 	testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

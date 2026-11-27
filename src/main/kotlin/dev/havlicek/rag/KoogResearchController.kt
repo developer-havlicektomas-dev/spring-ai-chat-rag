@@ -49,9 +49,9 @@ class KoogResearchController(
         val koogRun = runCatching {
             val id = "compare-" + UUID.randomUUID()
             koog.research(question, id).also { koog.forget(id) }.toEngineRun()
-        }.getOrElse { EngineRun("koog", "", emptyList(), null, null, null, 0, it.toString()) }
+        }.getOrElse { EngineRun("koog", "", emptyList(), null, null, null, 0, UpstreamErrors.safeMessage(it)) }
         val springRun = runCatching { withContext(Dispatchers.IO) { spring.ask(question) } }
-            .getOrElse { EngineRun("spring-ai", "", emptyList(), null, null, null, 0, it.toString()) }
+            .getOrElse { EngineRun("spring-ai", "", emptyList(), null, null, null, 0, UpstreamErrors.safeMessage(it)) }
         return CompareAnswer(question, koogRun, springRun)
     }
 }
